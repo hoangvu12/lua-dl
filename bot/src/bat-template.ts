@@ -52,6 +52,10 @@ set URL=https://github.com/%REPO%/releases/download/v%VERSION%/lua-dl.exe
 if not exist "%EXE%" (
   echo [lua-dl] Downloading lua-dl v%VERSION% ^(one-time per version^)...
   if not exist "%EXE_DIR%" mkdir "%EXE_DIR%"
+  REM Evict any previously-cached versions so the cache dir stays lean.
+  REM This only runs when we're already about to download a new exe, so it
+  REM never re-downloads on same-version re-runs.
+  del /q "%EXE_DIR%\lua-dl-*.exe" 2>nul
   curl -L --fail --progress-bar -o "%EXE%" "%URL%"
   if errorlevel 1 (
     echo.

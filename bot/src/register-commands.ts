@@ -1,0 +1,36 @@
+/**
+ * One-shot: registers the /dl slash command globally. Run once per schema
+ * change with `bun run register`.
+ *
+ * Global commands take up to 1 hour to propagate. For faster iteration during
+ * testing, swap `Routes.applicationCommands(appId)` for
+ * `Routes.applicationGuildCommands(appId, guildId)` and set GUILD_ID.
+ */
+import { REST, Routes, SlashCommandBuilder } from "discord.js";
+
+const token = process.env.DISCORD_TOKEN;
+const appId = process.env.DISCORD_APP_ID;
+if (!token || !appId) {
+  console.error("Missing DISCORD_TOKEN or DISCORD_APP_ID in env");
+  process.exit(1);
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("dl")
+    .setDescription("Get a .bat file to download a Steam game")
+    .addIntegerOption((opt) =>
+      opt
+        .setName("appid")
+        .setDescription("Steam App ID (e.g. 431960 for Wallpaper Engine)")
+        .setRequired(true)
+        .setMinValue(1)
+    )
+    .toJSON(),
+];
+
+const rest = new REST({ version: "10" }).setToken(token);
+
+console.log("Registering slash commands globally...");
+await rest.put(Routes.applicationCommands(appId), { body: commands });
+console.log("Done. Global commands may take up to 1 hour to propagate.");

@@ -1,0 +1,17 @@
+{
+  "name": "lua-dl-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "register": "bun run src/register-commands.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "bun-types": "latest"
+  }
+}

@@ -48,12 +48,12 @@ type ResolvedManifest struct {
 
 // ResolveLua returns a lua script for the app, trying ryuu first.
 func ResolveLua(ctx context.Context, appID uint32) (*ResolvedLua, error) {
-	verbose.Errf("[resolver] trying ryuu.lol for %d.lua", appID)
+	verbose.Vlog("[resolver] trying ryuu.lol for %d.lua", appID)
 	if text, err := ryuu.FetchLua(ctx, appID); err == nil {
-		verbose.Errf("[resolver] ✓ ryuu.lol/resellerlua (%d bytes lua)", len(text))
+		verbose.Vlog("[resolver] ✓ ryuu.lol/resellerlua (%d bytes lua)", len(text))
 		return &ResolvedLua{Source: "ryuu.lol/resellerlua", Text: text}, nil
 	} else {
-		verbose.Errf("[resolver] ryuu.lol failed (%v), racing %d GH mirrors", err, len(Mirrors))
+		verbose.Vlog("[resolver] ryuu.lol failed (%v), racing %d GH mirrors", err, len(Mirrors))
 	}
 
 	type result struct {
@@ -76,7 +76,7 @@ func ResolveLua(ctx context.Context, appID uint32) (*ResolvedLua, error) {
 		return nil, fmt.Errorf("all sources failed to serve %d.lua: %w", appID, err)
 	}
 	r := res.(result)
-	verbose.Errf("[resolver] ✓ %s (%d bytes lua)", r.repo, len(r.text))
+	verbose.Vlog("[resolver] ✓ %s (%d bytes lua)", r.repo, len(r.text))
 	return &ResolvedLua{Source: r.repo, Text: r.text}, nil
 }
 
@@ -90,15 +90,15 @@ func ResolveManifest(ctx context.Context, appID, depotID uint32, manifestID uint
 			if err := validateManifest("ryuu.lol/secure_download", data); err != nil {
 				return nil, err
 			}
-			verbose.Errf("[resolver] ✓ ryuu.lol/secure_download %s (%d bytes)", filename, len(data))
+			verbose.Vlog("[resolver] ✓ ryuu.lol/secure_download %s (%d bytes)", filename, len(data))
 			return &ResolvedManifest{Buffer: data, Source: "ryuu.lol/secure_download"}, nil
 		}
-		verbose.Errf("[resolver] ryuu bundle missing %s, falling back to GH mirrors", filename)
+		verbose.Vlog("[resolver] ryuu bundle missing %s, falling back to GH mirrors", filename)
 	} else {
-		verbose.Errf("[resolver] ryuu.lol failed (%v), racing %d GH mirrors", err, len(Mirrors))
+		verbose.Vlog("[resolver] ryuu.lol failed (%v), racing %d GH mirrors", err, len(Mirrors))
 	}
 
-	verbose.Errf("[resolver] racing %d mirrors for %d/%s", len(Mirrors), appID, filename)
+	verbose.Vlog("[resolver] racing %d mirrors for %d/%s", len(Mirrors), appID, filename)
 	type result struct {
 		repo string
 		buf  []byte
@@ -118,7 +118,7 @@ func ResolveManifest(ctx context.Context, appID, depotID uint32, manifestID uint
 		return nil, fmt.Errorf("all sources failed for %s: %w", filename, err)
 	}
 	r := res.(result)
-	verbose.Errf("[resolver] ✓ %s (%d bytes)", r.repo, len(r.buf))
+	verbose.Vlog("[resolver] ✓ %s (%d bytes)", r.repo, len(r.buf))
 	return &ResolvedManifest{Buffer: r.buf, Source: r.repo}, nil
 }
 

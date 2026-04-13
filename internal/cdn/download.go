@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Lucino772/envelop/pkg/steam/steamcdn"
@@ -78,7 +79,7 @@ func NewDownloader(client *steam.Client, cache *state.Cache) (*Downloader, error
 	if err != nil {
 		return nil, err
 	}
-	verbose.Errf("[cdn] %d servers available", pool.Size())
+	verbose.Vlog("[cdn] %d servers available", pool.Size())
 	// Tuned transport: HTTP/1.1 keep-alive with a generous per-host pool so
 	// we don't open-and-close a socket per chunk. TCP_NODELAY is on by
 	// default in Go's net package.
@@ -112,39 +113,49 @@ func (d *Downloader) DownloadDepot(ctx context.Context, req DepotRequest) error 
 	chunkSem := make(chan struct{}, maxParallelChunks)
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Count real files upfront (manifest entries include directories).
-	var total int64
+	// Count real files + total bytes upfront. Manifest entries include
+	// directories — filter those.
+	var totalFiles int64
+	var totalBytes uint64
 	for _, f := range req.Manifest.Files {
 		if uint32(f.Flags)&uint32(steamlang.EDepotFileFlag_Directory) == 0 {
-			total++
+			totalFiles++
+			totalBytes += f.TotalSize
 		}
 	}
-	var done int64
-	var doneMu sync.Mutex
+	var bytesDone atomic.Uint64
+	var filesDone atomic.Int64
+
+	// Progress ticker: draws a bar in place every 200ms. Stops when done
+	// is closed. This replaces the per-file spam — friends don't need to
+	// see thousands of filenames scroll by.
+	done := make(chan struct{})
+	go progressLoop(done, &bytesDone, &filesDone, totalBytes, totalFiles, req.DepotID)
 
 	for i := range req.Manifest.Files {
 		file := req.Manifest.Files[i]
-		// Directory entries — mkdir and move on.
 		if uint32(file.Flags)&uint32(steamlang.EDepotFileFlag_Directory) != 0 {
 			dirPath := filepath.Join(req.OutputDir, toOSPath(file.Filename))
 			if err := os.MkdirAll(dirPath, 0o755); err != nil {
+				close(done)
 				return err
 			}
 			continue
 		}
 		g.Go(func() error {
-			if err := d.downloadFile(gctx, req, file, chunkSem); err != nil {
+			if err := d.downloadFile(gctx, req, file, chunkSem, &bytesDone); err != nil {
 				return fmt.Errorf("file %q: %w", file.Filename, err)
 			}
-			doneMu.Lock()
-			done++
-			doneMu.Unlock()
-			verbose.StatusLine(fmt.Sprintf("[cdn] %d/%d  %s", done, total, file.Filename))
+			filesDone.Add(1)
+			verbose.Vlog("[cdn] %d/%d  %s", filesDone.Load(), totalFiles, file.Filename)
 			return nil
 		})
 	}
 
 	err := g.Wait()
+	close(done)
+	// One last draw so the final state lands on screen, then newline.
+	drawProgress(bytesDone.Load(), filesDone.Load(), totalBytes, totalFiles, req.DepotID, true)
 	verbose.StatusDone()
 	if err != nil {
 		return err
@@ -152,15 +163,89 @@ func (d *Downloader) DownloadDepot(ctx context.Context, req DepotRequest) error 
 	return d.state.Flush()
 }
 
-func (d *Downloader) downloadFile(ctx context.Context, req DepotRequest, file steamcdn.FileData, chunkSem chan struct{}) error {
+func progressLoop(done <-chan struct{}, bytesDone *atomic.Uint64, filesDone *atomic.Int64, totalBytes uint64, totalFiles int64, depotID uint32) {
+	// Only draw in non-verbose mode — verbose prints per-file lines.
+	if verbose.Enabled() {
+		return
+	}
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			drawProgress(bytesDone.Load(), filesDone.Load(), totalBytes, totalFiles, depotID, false)
+		}
+	}
+}
+
+// drawProgress renders a single status line. Runs on a ticker so rate is
+// a rolling estimate kept across calls.
+var (
+	rateLastT     time.Time
+	rateLastBytes uint64
+	rateSmoothed  float64
+	rateMu        sync.Mutex
+)
+
+func drawProgress(bytes uint64, files int64, totalBytes uint64, totalFiles int64, depotID uint32, final bool) {
+	// Compute short-window rate in MB/s. Exponential smoothing (α=0.3) to
+	// stop the number from jittering wildly.
+	rateMu.Lock()
+	now := time.Now()
+	var mbps float64
+	if !rateLastT.IsZero() {
+		dt := now.Sub(rateLastT).Seconds()
+		if dt > 0 {
+			inst := float64(bytes-rateLastBytes) / dt / 1e6
+			if rateSmoothed == 0 {
+				rateSmoothed = inst
+			} else {
+				rateSmoothed = 0.3*inst + 0.7*rateSmoothed
+			}
+			mbps = rateSmoothed
+		}
+	}
+	rateLastT = now
+	rateLastBytes = bytes
+	rateMu.Unlock()
+
+	pct := 0.0
+	if totalBytes > 0 {
+		pct = float64(bytes) / float64(totalBytes) * 100
+	}
+	if pct > 100 {
+		pct = 100
+	}
+
+	const barW = 24
+	filled := int(pct / 100 * barW)
+	if filled > barW {
+		filled = barW
+	}
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", barW-filled)
+
+	mb := float64(bytes) / 1e6
+	totalMB := float64(totalBytes) / 1e6
+
+	_ = depotID // kept in signature for future multi-depot detail; unused here
+	line := fmt.Sprintf("[%s] %5.1f%%  %6.1f/%6.1f MB  %5.1f MB/s  %d/%d files",
+		bar, pct, mb, totalMB, mbps, files, totalFiles)
+	verbose.StatusLine(line)
+}
+
+func (d *Downloader) downloadFile(ctx context.Context, req DepotRequest, file steamcdn.FileData, chunkSem chan struct{}, bytesDone *atomic.Uint64) error {
 	rel := toOSPath(file.Filename)
 	outPath := filepath.Join(req.OutputDir, rel)
 
 	// Resume check: if the cached entry matches size+sha, skip entirely.
+	// Still credit its bytes toward the progress bar so the bar reaches 100%.
 	if st, err := os.Stat(outPath); err == nil && uint64(st.Size()) == file.TotalSize {
 		if e, ok := d.state.Get(req.DepotID, req.ManifestID, file.Filename); ok &&
 			e.Size == st.Size() && e.SHA1 == fmt.Sprintf("%x", file.FileHash) {
 			verbose.Vlog("[cdn] skip %s (cached)", file.Filename)
+			bytesDone.Add(file.TotalSize)
 			return nil
 		}
 	}
@@ -212,6 +297,7 @@ func (d *Downloader) downloadFile(ctx context.Context, req DepotRequest, file st
 			if _, err := f.WriteAt(data, int64(chunk.Offset)); err != nil {
 				return err
 			}
+			bytesDone.Add(uint64(len(data)))
 			return nil
 		})
 	}

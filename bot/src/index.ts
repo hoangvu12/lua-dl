@@ -17,6 +17,7 @@ import {
   AttachmentBuilder,
 } from "discord.js";
 import { renderBat } from "./bat-template";
+import { pickLang, reply } from "./i18n";
 
 const token = process.env.DISCORD_TOKEN;
 const cliVersion = process.env.CLI_VERSION;
@@ -49,14 +50,9 @@ client.on(Events.InteractionCreate, async (i) => {
     name: `lua-dl-${appid}.bat`,
   });
 
+  const lang = pickLang(i.locale);
   await i.reply({
-    content:
-      `📥 **lua-dl** — Steam App \`${appid}\`\n` +
-      `1. Download the attached \`.bat\` file.\n` +
-      `2. Put it in an **empty folder** (e.g. \`Desktop\\Games\`).\n` +
-      `3. Double-click it. First run downloads ~24 MB of \`lua-dl.exe\`.\n` +
-      `4. Game lands in a folder next to the \`.bat\`.\n\n` +
-      `⚠️ Windows may warn "protected your PC" on first run — click **More info** → **Run anyway**. One-time per PC.`,
+    content: reply(lang, appid),
     files: [file],
   });
 });

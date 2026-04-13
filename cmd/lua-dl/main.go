@@ -14,6 +14,8 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,6 +51,12 @@ func run() error {
 	if hasFlag(rest, "-v") || hasFlag(rest, "--verbose") {
 		verbose.Set(true)
 	}
+	// Silence envelop's "Following packet was not handled" log.Println spam.
+	// These are cosmetic — envelop routes unknown incoming messages through
+	// the standard log package. Dropping them keeps our output clean.
+	if !verbose.Enabled() {
+		log.SetOutput(io.Discard)
+	}
 
 	ctx := context.Background()
 
@@ -79,23 +87,27 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("\n== Parsed %s ==\n", sourceLabel)
-	fmt.Printf("App ID: %d\n", parsed.AppID)
-	fmt.Printf("Entries: %d\n", len(parsed.Depots))
-	for _, d := range parsed.Depots {
-		keyDisp := "(no key)"
-		if d.Key != "" {
-			keyDisp = d.Key[:12] + "…"
+	// Parse subcommand prints the full table. Other subcommands use the
+	// parsed data silently (or under -v via resolver/cdn chatter).
+	if cmd == "parse" || verbose.Enabled() {
+		fmt.Printf("\n== Parsed %s ==\n", sourceLabel)
+		fmt.Printf("App ID: %d\n", parsed.AppID)
+		fmt.Printf("Entries: %d\n", len(parsed.Depots))
+		for _, d := range parsed.Depots {
+			keyDisp := "(no key)"
+			if d.Key != "" {
+				keyDisp = d.Key[:12] + "…"
+			}
+			manif := ""
+			if d.ManifestID != "" {
+				manif = " manifest=" + d.ManifestID
+			}
+			label := ""
+			if d.Label != "" {
+				label = " — " + d.Label
+			}
+			fmt.Printf("  %d  key=%s%s%s\n", d.ID, keyDisp, manif, label)
 		}
-		manif := ""
-		if d.ManifestID != "" {
-			manif = " manifest=" + d.ManifestID
-		}
-		label := ""
-		if d.Label != "" {
-			label = " — " + d.Label
-		}
-		fmt.Printf("  %d  key=%s%s%s\n", d.ID, keyDisp, manif, label)
 	}
 
 	if cmd == "parse" {
@@ -159,7 +171,7 @@ func run() error {
 	if outDir == "" {
 		outDir = filepath.Join(".", sanitize.FolderName(info.Name))
 	}
-	fmt.Fprintf(os.Stderr, "\n== Game: %s ==\n== Output: %s ==\n", info.Name, outDir)
+	fmt.Fprintf(os.Stderr, "\n%s (%d)\nDownloading to %s\n\n", info.Name, parsed.AppID, outDir)
 
 	stateCache := state.New(filepath.Join(outDir, ".lua-dl-state.json"))
 
@@ -225,15 +237,14 @@ func run() error {
 		return fmt.Errorf("no downloadable depots matched filter")
 	}
 
-	fmt.Fprintf(os.Stderr, "\n== Downloading %d depot(s) to %s ==\n", len(targets), outDir)
-
 	dl, err := cdn.NewDownloader(client, stateCache)
 	if err != nil {
 		return err
 	}
 
+	overallStart := time.Now()
 	for _, t := range targets {
-		fmt.Fprintf(os.Stderr, "\n[depot %d] manifest=%d\n", t.depotID, t.manifestID)
+		verbose.Vlog("\n[depot %d] manifest=%d", t.depotID, t.manifestID)
 
 		mCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		rm, err := resolver.ResolveManifest(mCtx, parsed.AppID, t.depotID, t.manifestID)
@@ -249,17 +260,6 @@ func run() error {
 			return fmt.Errorf("depot %d parse: %w", t.depotID, err)
 		}
 
-		// Count non-directory files for progress.
-		var files, bytes uint64
-		for _, f := range manifest.Files {
-			if f.TotalSize > 0 {
-				files++
-				bytes += f.TotalSize
-			}
-		}
-		fmt.Fprintf(os.Stderr, "[depot %d] %d files, %.1f MB\n",
-			t.depotID, files, float64(bytes)/1e6)
-
 		req := cdn.DepotRequest{
 			AppID:      parsed.AppID,
 			DepotID:    t.depotID,
@@ -268,21 +268,18 @@ func run() error {
 			Manifest:   manifest,
 			OutputDir:  outDir,
 		}
-		start := time.Now()
 		if err := dl.DownloadDepot(ctx, req); err != nil {
 			_ = stateCache.Flush()
 			return fmt.Errorf("depot %d: %w", t.depotID, err)
 		}
-		elapsed := time.Since(start).Seconds()
-		if elapsed > 0.5 {
-			fmt.Fprintf(os.Stderr, "[depot %d] done in %.1fs (%.2f MB/s)\n",
-				t.depotID, elapsed, (float64(bytes)/1e6)/elapsed)
-		} else {
-			fmt.Fprintf(os.Stderr, "[depot %d] done in %.2fs (cached)\n",
-				t.depotID, elapsed)
-		}
 	}
 
+	elapsed := time.Since(overallStart).Seconds()
+	if elapsed > 0.5 {
+		fmt.Fprintf(os.Stderr, "\nDone in %.1fs.\n", elapsed)
+	} else {
+		fmt.Fprintf(os.Stderr, "\nDone (resumed from cache).\n")
+	}
 	return stateCache.Flush()
 }
 

@@ -118,7 +118,7 @@ func run() error {
 
 	switch cmd {
 	case "probe":
-		return cmdProbe(client, parsed)
+		return cmdProbe(ctx, client, parsed)
 	case "download":
 		return cmdDownload(ctx, client, parsed, rest)
 	default:
@@ -187,9 +187,9 @@ func connectSteam() (*steam.Client, error) {
 	return client, nil
 }
 
-func cmdProbe(client *steam.Client, parsed *lua.ParseResult) error {
+func cmdProbe(ctx context.Context, client *steam.Client, parsed *lua.ParseResult) error {
 	fmt.Println("\n== Probing Steam for live manifest IDs ==")
-	info, err := client.GetAppInfo(parsed.AppID)
+	info, err := steam.FetchAppInfo(ctx, client, parsed.AppID)
 	if err != nil {
 		return err
 	}
@@ -218,9 +218,9 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 		return err
 	}
 
-	info, err := client.GetAppInfo(parsed.AppID)
+	info, err := steam.FetchAppInfo(ctx, client, parsed.AppID)
 	if err != nil {
-		return fmt.Errorf("PICS: %w", err)
+		return fmt.Errorf("app info: %w", err)
 	}
 
 	outDir := flagVal(rest, "--out")
@@ -235,7 +235,7 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 	if len(candidates) == 0 {
 		return fmt.Errorf("no downloadable depots found in lua file")
 	}
-	enrichNames(client, candidates)
+	enrichNames(ctx, client, candidates)
 	candidates = prepareCandidates(candidates, depotFilter)
 
 	targets, err := selectTargets(candidates, depotFilter, selectAll, info, parsed)
@@ -393,7 +393,7 @@ func resolveManifestID(pd steam.Depot, inPICS bool, luaManifest string) uint64 {
 // Steam DLC appids usually equal the depot id, so this often pulls back a
 // real title ("Wallpaper Engine — Workshop") without the parent app having
 // to list the DLC explicitly. Best-effort, runs in parallel.
-func enrichNames(client *steam.Client, candidates []target) {
+func enrichNames(ctx context.Context, client *steam.Client, candidates []target) {
 	var wg sync.WaitGroup
 	for i := range candidates {
 		c := &candidates[i]
@@ -403,7 +403,7 @@ func enrichNames(client *steam.Client, candidates []target) {
 		wg.Add(1)
 		go func(c *target) {
 			defer wg.Done()
-			if sub, err := client.GetAppInfo(c.depotID); err == nil && sub.Name != "" {
+			if sub, err := steam.FetchAppInfo(ctx, client, c.depotID); err == nil && sub.Name != "" {
 				c.name = sub.Name
 			}
 		}(c)

@@ -110,6 +110,15 @@ func (d *Downloader) DownloadDepot(ctx context.Context, req DepotRequest) error 
 		return err
 	}
 
+	// Reset the rolling rate state — it's global across depots but bytesDone
+	// starts at 0 each call, so stale values cause a uint underflow on the
+	// first tick and print nonsense like "57478 MB/s".
+	rateMu.Lock()
+	rateLastT = time.Time{}
+	rateLastBytes = 0
+	rateSmoothed = 0
+	rateMu.Unlock()
+
 	chunkSem := make(chan struct{}, maxParallelChunks)
 	g, gctx := errgroup.WithContext(ctx)
 

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Lucino772/envelop/pkg/steam/steamcm"
@@ -20,11 +21,22 @@ import (
 	"github.com/Lucino772/envelop/pkg/steam/steamvdf"
 )
 
+// Depot mirrors the fields from PICS we care about for filtering, matching
+// DepotDownloader's install logic (ContentDownloader.cs lines 522-552).
+//
+// A depot is "base content" (always installed) when it has no OSList, no
+// Language, no LowViolence flag, and no DLCAppID. Anything with a filter
+// is opt-in for the user whose environment matches that filter.
 type Depot struct {
-	DepotID    uint32
-	ManifestID uint64
-	Name       string
-	MaxSize    uint64
+	DepotID     uint32
+	ManifestID  uint64
+	Name        string
+	MaxSize     uint64
+	DLCAppID    uint32   // non-zero → belongs to a DLC app
+	Language    string   // PICS "config.language", empty for non-locale depots
+	OSList      []string // PICS "config.oslist", e.g. ["windows"] — empty means platform-agnostic
+	OSArch      string   // PICS "config.osarch", e.g. "64"
+	LowViolence bool     // PICS "config.lowviolence"
 }
 
 type AppInfo struct {
@@ -76,12 +88,17 @@ func (c *Client) GetCDNAuthToken(appID, depotID uint32, serverHost string) (stri
 // call to convert that panic into a normal error and retry a few times
 // before giving up.
 func (c *Client) Connect(timeout time.Duration) error {
-	const attempts = 3
+	const attempts = 6
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		if err := c.safeConnect(); err != nil {
 			lastErr = err
-			time.Sleep(time.Duration(500*(i+1)) * time.Millisecond)
+			// Exponential-ish backoff: 500ms, 1s, 2s, 3s, 4s, 5s.
+			sleep := time.Duration(500*(1<<i)) * time.Millisecond
+			if sleep > 5*time.Second {
+				sleep = 5 * time.Second
+			}
+			time.Sleep(sleep)
 			continue
 		}
 		return c.conn.WaitReady(timeout)
@@ -113,12 +130,32 @@ func (c *Client) LogInAnonymously() error {
 }
 
 // GetAppInfo fetches PICS ProductInfo for a single app and extracts the
-// common.name plus each depot's public manifest gid. Anonymous accounts can
-// always read public PICS data — no access check needed.
+// common.name plus each depot's public manifest gid.
+//
+// Some apps (e.g. 1054430 Monster Hunter World, 814380 Sekiro) require a
+// per-app access token before PICS will return anything — the token-less
+// request silently returns zero apps. We fetch the token first, then pass
+// it into the product info call. Anonymous accounts can always do this
+// round-trip for public apps.
 func (c *Client) GetAppInfo(appID uint32) (*AppInfo, error) {
+	var token uint64
+	tokResp, err := c.apps.PICSGetAccessTokens(
+		c.conn,
+		[]steamcm.PICSRequest{{ID: appID}},
+		nil,
+	)
+	if err == nil {
+		for _, t := range tokResp.GetAppAccessTokens() {
+			if t.GetAppid() == appID {
+				token = t.GetAccessToken()
+				break
+			}
+		}
+	}
+
 	resp, err := c.apps.PICSGetProductInfo(
 		c.conn,
-		[]steamcm.PICSRequest{{ID: appID, AccessToken: 0}},
+		[]steamcm.PICSRequest{{ID: appID, AccessToken: token}},
 		nil,
 		false,
 	)
@@ -126,7 +163,7 @@ func (c *Client) GetAppInfo(appID uint32) (*AppInfo, error) {
 		return nil, err
 	}
 	if len(resp.Apps) == 0 {
-		return nil, errors.New("PICS returned no apps")
+		return nil, fmt.Errorf("PICS returned no apps for %d (app may be delisted or region-locked)", appID)
 	}
 	app := findApp(resp.Apps, appID)
 	if app == nil {
@@ -161,6 +198,25 @@ func (c *Client) GetAppInfo(appID uint32) (*AppInfo, error) {
 			if maxsize, ok := child.GetChild("maxsize"); ok {
 				if n, err := strconv.ParseUint(maxsize.Value, 10, 64); err == nil {
 					d.MaxSize = n
+				}
+			}
+			if dlc, ok := child.GetChild("dlcappid"); ok {
+				if n, err := strconv.ParseUint(dlc.Value, 10, 32); err == nil {
+					d.DLCAppID = uint32(n)
+				}
+			}
+			if cfg, ok := child.GetChild("config"); ok {
+				if lang, ok := cfg.GetChild("language"); ok {
+					d.Language = lang.Value
+				}
+				if osl, ok := cfg.GetChild("oslist"); ok && osl.Value != "" {
+					d.OSList = strings.Split(osl.Value, ",")
+				}
+				if osa, ok := cfg.GetChild("osarch"); ok {
+					d.OSArch = osa.Value
+				}
+				if lv, ok := cfg.GetChild("lowviolence"); ok && (lv.Value == "1" || lv.Value == "true") {
+					d.LowViolence = true
 				}
 			}
 			if manifests, ok := child.GetChild("manifests"); ok {

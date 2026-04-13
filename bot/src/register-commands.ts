@@ -25,6 +25,7 @@ const commands = [
         .setDescription("Steam App ID (e.g. 431960 for Wallpaper Engine)")
         .setRequired(true)
         .setMinValue(1)
+        .setMaxValue(10_000_000)
     )
     .toJSON(),
 ];

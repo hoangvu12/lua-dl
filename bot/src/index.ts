@@ -10,19 +10,16 @@
  * without Discord review for no benefit.
  */
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
-  MessageFlags,
-  AttachmentBuilder,
 } from "discord.js";
 import { renderBat } from "./bat-template";
 import { pickLang, reply } from "./i18n";
 
-const token = process.env.DISCORD_TOKEN;
-const cliVersion = process.env.CLI_VERSION;
-const cliRepo = process.env.CLI_REPO;
-if (!token || !cliVersion || !cliRepo) {
+const { DISCORD_TOKEN, CLI_VERSION, CLI_REPO } = process.env;
+if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
   console.error("Missing env: DISCORD_TOKEN, CLI_VERSION, CLI_REPO required");
   process.exit(1);
 }
@@ -36,25 +33,19 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, async (i) => {
   if (!i.isChatInputCommand() || i.commandName !== "dl") return;
 
+  // Range is enforced by the slash command's min/max — Discord rejects
+  // out-of-range values before they reach us.
   const appid = i.options.getInteger("appid", true);
-  if (appid <= 0 || appid > 10_000_000) {
-    await i.reply({
-      content: "❌ Invalid App ID.",
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
+  const bat = renderBat({ appid, version: CLI_VERSION, repo: CLI_REPO });
 
-  const bat = renderBat({ appid, version: cliVersion, repo: cliRepo });
-  const file = new AttachmentBuilder(Buffer.from(bat, "utf8"), {
-    name: `lua-dl-${appid}.bat`,
-  });
-
-  const lang = pickLang(i.locale);
   await i.reply({
-    content: reply(lang, appid),
-    files: [file],
+    content: reply(pickLang(i.locale), appid),
+    files: [
+      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
+        name: `lua-dl-${appid}.bat`,
+      }),
+    ],
   });
 });
 
-client.login(token);
+client.login(DISCORD_TOKEN);

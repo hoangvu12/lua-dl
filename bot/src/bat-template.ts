@@ -11,14 +11,10 @@
  *  - `chcp 65001` so Unicode game names in the CLI's stderr render correctly
  *  - `^(` / `^)` caret-escapes inside the `if` block's echoes
  *  - PowerShell fallback for the GitHub API call because bat can't parse JSON
+ *  - `{{BT}}` placeholder stands in for the literal backticks around the
+ *    PowerShell invocation — a real backtick would close this template literal
  */
-
-// The `.bat` template wraps a PowerShell command in `for /f "usebackq" %%v
-// in (`…`)`. That inner backtick would terminate our JS template literal,
-// so split the template around it and rejoin via string concat.
-const BT = "`";
-
-const TEMPLATE_HEAD = String.raw`@echo off
+const TEMPLATE = String.raw`@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 title lua-dl — app {{APPID}}
@@ -34,11 +30,7 @@ echo.
 
 REM Resolve latest version from GitHub API; fall back to baked version on failure.
 echo [lua-dl] Checking for latest version...
-for /f "usebackq delims=" %%v in (`;
-
-const PS_COMMAND = String.raw`powershell -NoProfile -ExecutionPolicy Bypass -Command "try { (Invoke-RestMethod 'https://api.github.com/repos/%REPO%/releases/latest' -TimeoutSec 5).tag_name.TrimStart('v') } catch { '' }"`;
-
-const TEMPLATE_TAIL = String.raw`) do set VERSION=%%v
+for /f "usebackq delims=" %%v in ({{BT}}powershell -NoProfile -ExecutionPolicy Bypass -Command "try { (Invoke-RestMethod 'https://api.github.com/repos/%REPO%/releases/latest' -TimeoutSec 5).tag_name.TrimStart('v') } catch { '' }"{{BT}}) do set VERSION=%%v
 if "%VERSION%"=="" (
   echo [lua-dl] Couldn't reach GitHub API, using fallback v%FALLBACK_VERSION%
   set VERSION=%FALLBACK_VERSION%
@@ -83,8 +75,6 @@ pause
 exit /b %RC%
 `;
 
-const TEMPLATE = TEMPLATE_HEAD + BT + PS_COMMAND + BT + TEMPLATE_TAIL;
-
 export interface BatParams {
   appid: number;
   version: string;
@@ -95,5 +85,6 @@ export function renderBat({ appid, version, repo }: BatParams): string {
   return TEMPLATE
     .replace(/\{\{APPID\}\}/g, String(appid))
     .replace(/\{\{VERSION\}\}/g, version)
-    .replace(/\{\{REPO\}\}/g, repo);
+    .replace(/\{\{REPO\}\}/g, repo)
+    .replace(/\{\{BT\}\}/g, "`");
 }

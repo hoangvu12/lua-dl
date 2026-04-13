@@ -6,15 +6,41 @@
  *   probe <file.lua>     — parse + anonymous-login to Steam + fetch live manifest IDs
  */
 
-import { readFileSync } from "node:fs";
+import "./http-patch"; // MUST be first — tunes globalAgent before steam-user loads
+import "./bundle-prelude"; // force bun --compile to bundle steam-user transitive deps
+import { shutdownLzmaPool } from "./cdn-patch"; // LZMA decompress → worker pool
+
+if (process.env.CPU_SAMPLE === "1") {
+  let prevCpu = process.cpuUsage();
+  let prevT = process.hrtime.bigint();
+  setInterval(() => {
+    const cpu = process.cpuUsage(prevCpu);
+    const t = process.hrtime.bigint();
+    const elapsedMs = Number(t - prevT) / 1e6;
+    const totalCpuMs = (cpu.user + cpu.system) / 1000;
+    const pct = ((totalCpuMs / elapsedMs) * 100).toFixed(0);
+    process.stderr.write(
+      `[cpu] main=${pct}% user=${(cpu.user / 1000).toFixed(0)}ms sys=${(cpu.system / 1000).toFixed(0)}ms\n`
+    );
+    prevCpu = process.cpuUsage();
+    prevT = process.hrtime.bigint();
+  }, 2000).unref();
+}
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { parseLua } from "./lua";
-import { anonymousLogin, getAppDepots } from "./steam";
+import { anonymousLogin, getAppDepots, getAppInfo } from "./steam";
 import { injectDepotKeys, downloadDepot } from "./download";
+import { setVerbose } from "./verbose";
+import { StateCache } from "./state";
+import { resolveLua } from "./manifest-resolver";
+import { sanitizeFolderName } from "./sanitize";
 
-const [, , cmd, file, ...rest] = process.argv;
+const [, , cmd, arg, ...rest] = process.argv;
+if (rest.includes("--verbose") || rest.includes("-v")) setVerbose(true);
 
-if (!cmd || !file) {
-  console.error("Usage: bun run src/cli.ts <parse|probe|download> <file.lua> [--depot ID] [--out DIR]");
+if (!cmd || !arg) {
+  console.error("Usage: bun run src/cli.ts <parse|probe|download> <file.lua|appid> [--depot ID] [--out DIR]");
   process.exit(1);
 }
 
@@ -23,10 +49,21 @@ function flag(name: string): string | undefined {
   return i >= 0 ? rest[i + 1] : undefined;
 }
 
-const source = readFileSync(file, "utf8");
+// arg is either a .lua file path or a bare appid. Bare appid → fetch from mirror.
+let source: string;
+let sourceLabel: string;
+if (/^\d+$/.test(arg) && !existsSync(arg)) {
+  const appId = Number(arg);
+  const { source: mirror, text } = await resolveLua(appId);
+  source = text;
+  sourceLabel = `appid ${appId} via ${mirror}`;
+} else {
+  source = readFileSync(arg, "utf8");
+  sourceLabel = arg;
+}
 const parsed = parseLua(source);
 
-console.log(`\n== Parsed ${file} ==`);
+console.log(`\n== Parsed ${sourceLabel} ==`);
 console.log(`App ID: ${parsed.appId}`);
 console.log(`Entries: ${parsed.depots.length}`);
 for (const d of parsed.depots) {
@@ -40,14 +77,21 @@ if (cmd === "parse") process.exit(0);
 
 if (cmd === "download") {
   const onlyDepot = flag("--depot") ? Number(flag("--depot")) : undefined;
-  const outDir = flag("--out") ?? "./out";
 
   const client = await anonymousLogin();
   injectDepotKeys(client, parsed.depots);
 
+  let state: StateCache | undefined;
   try {
-    const liveDepots = await getAppDepots(client, parsed.appId);
-    const targets = liveDepots.filter((d) => {
+    const appInfo = await getAppInfo(client, parsed.appId);
+    const outDir =
+      flag("--out") ?? join(".", sanitizeFolderName(appInfo.name));
+    state = new StateCache(join(outDir, ".lua-dl-state.json"));
+
+    console.error(`\n== Game: ${appInfo.name} ==`);
+    console.error(`== Output: ${outDir} ==`);
+
+    const targets = appInfo.depots.filter((d) => {
       if (!d.manifestId) return false;
       if (onlyDepot && d.depotId !== onlyDepot) return false;
       // Only download depots we have keys for
@@ -68,11 +112,14 @@ if (cmd === "download") {
         parsed.appId,
         t.depotId,
         t.manifestId!,
-        outDir
+        outDir,
+        state
       );
     }
   } finally {
+    state?.flush();
     client.logOff();
+    shutdownLzmaPool();
     setTimeout(() => process.exit(0), 500);
   }
 }

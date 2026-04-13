@@ -8,20 +8,22 @@
  * (which would fail for apps the anonymous account doesn't own).
  */
 
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import type SteamUser from "steam-user";
 import type { DepotEntry } from "./lua";
 import { resolveManifest } from "./manifest-resolver";
+import { VERBOSE, vlog, statusLine, statusDone } from "./verbose";
+import { StateCache, toHex } from "./state";
+// Static import so bun --compile bundles this. createRequire escapes the
+// bundler and blows up at runtime.
+import ContentManifestModule from "steam-user/components/content_manifest.js";
 
-// steam-user doesn't re-export ContentManifest, but it lives in components/.
-// We reach in directly — same module the getManifest helper uses internally.
-const require = createRequire(import.meta.url);
 const ContentManifest: {
   parse: (buffer: Buffer) => any;
   decryptFilenames: (manifest: any, key: Buffer) => void;
-} = require("steam-user/components/content_manifest.js");
+} = ContentManifestModule as any;
 
 export function injectDepotKeys(
   client: SteamUser,
@@ -38,13 +40,13 @@ export function injectDepotKeys(
     if (injected) {
       return { key: injected };
     }
-    console.error(
+    vlog(
       `[inject] no lua key for depot ${depotID}, falling back to Steam API`
     );
     return orig(appID, depotID);
   };
 
-  console.error(`[inject] depot keys loaded: ${[...keyMap.keys()].join(", ")}`);
+  vlog(`[inject] depot keys loaded: ${[...keyMap.keys()].join(", ")}`);
 }
 
 interface ManifestFile {
@@ -64,14 +66,24 @@ interface ParsedManifest {
 
 const FLAG_DIRECTORY = 64;
 
+async function sha1File(path: string): Promise<string> {
+  const hash = createHash("sha1");
+  const file = Bun.file(path);
+  const stream = file.stream();
+  // @ts-ignore — Bun ReadableStream async iterable
+  for await (const chunk of stream) hash.update(chunk);
+  return hash.digest("hex");
+}
+
 export async function downloadDepot(
   client: SteamUser,
   appId: number,
   depotId: number,
   manifestId: string,
-  outputDir: string
+  outputDir: string,
+  state: StateCache
 ): Promise<void> {
-  console.error(
+  vlog(
     `\n[download] app=${appId} depot=${depotId} manifest=${manifestId}`
   );
 
@@ -81,27 +93,22 @@ export async function downloadDepot(
     depotId,
     manifestId
   );
-  console.error(`[download] parsing manifest (from ${source})...`);
+  vlog(`[download] parsing manifest (from ${source})...`);
 
   const manifest: ParsedManifest = ContentManifest.parse(manifestBuf);
 
   if (manifest.filenames_encrypted) {
-    const keyHex = (() => {
-      // Pull key out of the injected map by forcing a key lookup via the patched method
-      return undefined;
-    })();
-    // Filenames are AES-encrypted with the depot key. Decrypt using our injected key.
     const injectedKey: Buffer = (
       await (client as any).getDepotDecryptionKey(appId, depotId)
     ).key;
     ContentManifest.decryptFilenames(manifest, injectedKey);
-    console.error(`[download] filenames decrypted`);
+    if (VERBOSE) console.error(`[download] filenames decrypted`);
   }
 
   const files = manifest.files.filter((f) => !(f.flags & FLAG_DIRECTORY));
   const totalSize = files.reduce((s, f) => s + Number(f.size), 0);
   console.error(
-    `[download] manifest: ${manifest.files.length} entries (${files.length} files, ${(totalSize / 1e6).toFixed(1)} MB)`
+    `[download] depot ${depotId}: ${files.length} files, ${(totalSize / 1e6).toFixed(1)} MB`
   );
 
   // Pre-create directories
@@ -112,8 +119,10 @@ export async function downloadDepot(
 
   let done = 0;
   let bytes = 0;
+  let skipped = 0;
+  let skippedBytes = 0;
   const start = Date.now();
-  const CONCURRENCY = 16;
+  const CONCURRENCY = 24;
 
   // Pre-create all directories up front (avoids contention)
   const dirs = new Set<string>();
@@ -129,40 +138,102 @@ export async function downloadDepot(
       if (!file) return;
       const rel = normalizePath(file.filename);
       const outPath = join(outputDir, rel);
+      const partPath = outPath + ".partial";
       const size = Number(file.size);
+      const manifestSha = toHex(file.sha_content);
+
+      // Resume check: existing file, size match, sha match → skip
+      if (size > 0 && manifestSha && existsSync(outPath)) {
+        const st = statSync(outPath);
+        if (st.size === size) {
+          const cached = state.get(depotId, manifestId, rel);
+          let sha: string | undefined;
+          if (
+            cached &&
+            cached.size === size &&
+            cached.mtime === st.mtimeMs &&
+            cached.sha1 === manifestSha
+          ) {
+            sha = cached.sha1;
+          } else {
+            sha = await sha1File(outPath);
+            if (sha === manifestSha) {
+              state.set(depotId, manifestId, rel, {
+                size,
+                sha1: sha,
+                mtime: st.mtimeMs,
+              });
+            }
+          }
+          if (sha === manifestSha) {
+            done++;
+            skipped++;
+            bytes += size;
+            skippedBytes += size;
+            continue;
+          }
+        }
+      }
 
       if (size === 0) {
         await Bun.write(outPath, new Uint8Array(0));
       } else {
-        try {
-          await (client as any).downloadFile(appId, depotId, file, outPath);
-        } catch (err: any) {
-          console.error(`[download] FAILED ${rel}: ${err?.message ?? err}`);
-          throw err;
+        const MAX_ATTEMPTS = 4;
+        let lastErr: any;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          try {
+            if (existsSync(partPath)) rmSync(partPath);
+            await (client as any).downloadFile(appId, depotId, file, partPath);
+            renameSync(partPath, outPath);
+            if (manifestSha) {
+              const st = statSync(outPath);
+              state.set(depotId, manifestId, rel, {
+                size,
+                sha1: manifestSha,
+                mtime: st.mtimeMs,
+              });
+            }
+            lastErr = undefined;
+            break;
+          } catch (err: any) {
+            lastErr = err;
+            const msg = err?.message ?? String(err);
+            if (attempt < MAX_ATTEMPTS) {
+              const delay = 500 * 2 ** (attempt - 1);
+              vlog(`[retry ${attempt}/${MAX_ATTEMPTS - 1}] ${rel}: ${msg} — waiting ${delay}ms`);
+              await new Promise((r) => setTimeout(r, delay));
+            }
+          }
+        }
+        if (lastErr) {
+          console.error(`\n[download] FAILED ${rel} after ${MAX_ATTEMPTS} attempts: ${lastErr?.message ?? lastErr}`);
+          throw lastErr;
         }
       }
 
       done++;
       bytes += size;
 
-      // Throttle progress logging (every ~1% or every 25 files)
       const now = Date.now();
-      if (done === files.length || done - lastLogged >= 25 || now - start < 2000) {
+      if (done === files.length || done - lastLogged >= 10 || now - start < 2000) {
         lastLogged = done;
         const pct = ((bytes / totalSize) * 100).toFixed(1);
         const mb = (bytes / 1e6).toFixed(1);
         const elapsed = (now - start) / 1000;
         const mbps = (bytes / 1e6 / elapsed).toFixed(1);
-        console.error(
-          `[download] [${done}/${files.length}] ${pct}% ${mb}MB @ ${mbps}MB/s  ${rel}`
+        statusLine(
+          `[${done}/${files.length}] ${pct}% ${mb}MB @ ${mbps}MB/s  ${rel.slice(-60)}`
         );
       }
     }
   }
 
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  statusDone();
 
+  const skipInfo = skipped > 0 ? ` (${skipped} skipped, ${(skippedBytes / 1e6).toFixed(1)} MB)` : "";
   console.error(
-    `\n[download] ✅ depot ${depotId} complete — ${done} files, ${(bytes / 1e6).toFixed(1)} MB in ${((Date.now() - start) / 1000).toFixed(1)}s`
+    `[download] depot ${depotId} done — ${done} files, ${(bytes / 1e6).toFixed(1)} MB in ${((Date.now() - start) / 1000).toFixed(1)}s${skipInfo}`
   );
+  state.flush();
 }

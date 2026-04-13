@@ -1,7 +1,12 @@
 node_modules/
+.claude/
 out/
 bun.lock
 bun.lockb
 *.log
 /tmp/
 .DS_Store
+bot/node_modules/
+bot/.env
+lua-dl.exe
+*.exe

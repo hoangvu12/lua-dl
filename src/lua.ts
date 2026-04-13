@@ -29,7 +29,7 @@ export function parseLua(source: string): LuaParseResult {
 
   // addappid(APPID, 1, "KEY")  — optional trailing comment
   const addRe =
-    /addappid\s*\(\s*(\d+)\s*,\s*\d+\s*,\s*"([0-9a-fA-F]+)"\s*\)\s*(?:--\s*(.*))?/g;
+    /addappid\s*\(\s*(\d+)\s*,\s*\d+\s*,\s*"([0-9a-fA-F]+)"\s*\)[ \t]*(?:--[ \t]*([^\n]*))?/g;
   for (const m of clean.matchAll(addRe)) {
     const id = Number(m[1]);
     depots.set(id, {

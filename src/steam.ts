@@ -4,12 +4,18 @@
  */
 
 import SteamUser from "steam-user";
+import { vlog } from "./verbose";
 
 export interface DepotInfo {
   depotId: number;
   name?: string;
   manifestId?: string;   // latest on "public" branch
   maxSize?: number;
+}
+
+export interface AppInfo {
+  name: string;
+  depots: DepotInfo[];
 }
 
 export async function anonymousLogin(): Promise<SteamUser> {
@@ -22,9 +28,9 @@ export async function anonymousLogin(): Promise<SteamUser> {
       reject(new Error("login timed out after 20s"));
     }, 20000);
 
-    client.on("debug", (msg: string) => console.error("[steam:debug]", msg));
+    client.on("debug", (msg: string) => vlog("[steam:debug]", msg));
     client.on("disconnected", (eresult: number, msg: string) =>
-      console.error("[steam] disconnected", eresult, msg)
+      vlog("[steam] disconnected", eresult, msg)
     );
     client.on("error", (err: Error) => {
       console.error("[steam] error:", err.message);
@@ -32,40 +38,44 @@ export async function anonymousLogin(): Promise<SteamUser> {
       reject(err);
     });
     client.once("loggedOn", () => {
-      console.error("[steam] logged on anonymously");
+      vlog("[steam] logged on anonymously");
       clearTimeout(timer);
       resolve(client);
     });
 
-    console.error("[steam] calling logOn({anonymous:true})...");
+    vlog("[steam] calling logOn({anonymous:true})...");
     client.logOn({ anonymous: true });
   });
+}
+
+export async function getAppInfo(
+  client: SteamUser,
+  appId: number
+): Promise<AppInfo> {
+  const info: any = await client.getProductInfo([appId], [], true);
+  const app = info.apps[appId];
+  if (!app) throw new Error(`No product info returned for app ${appId}`);
+
+  const name: string = app.appinfo?.common?.name ?? `app-${appId}`;
+  const rawDepots = app.appinfo?.depots ?? {};
+  const depots: DepotInfo[] = [];
+
+  for (const [key, raw] of Object.entries<any>(rawDepots)) {
+    if (!/^\d+$/.test(key)) continue;
+    depots.push({
+      depotId: Number(key),
+      name: raw?.name,
+      manifestId: raw?.manifests?.public?.gid,
+      maxSize: raw?.maxsize ? Number(raw.maxsize) : undefined,
+    });
+  }
+
+  return { name, depots };
 }
 
 export async function getAppDepots(
   client: SteamUser,
   appId: number
 ): Promise<DepotInfo[]> {
-  const info: any = await client.getProductInfo([appId], [], true);
-  const app = info.apps[appId];
-  if (!app) throw new Error(`No product info returned for app ${appId}`);
-
-  const depots = app.appinfo?.depots ?? {};
-  const out: DepotInfo[] = [];
-
-  for (const [key, raw] of Object.entries<any>(depots)) {
-    // Only numeric keys are actual depot entries (skip branches/etc)
-    if (!/^\d+$/.test(key)) continue;
-    const depotId = Number(key);
-    const manifestId: string | undefined = raw?.manifests?.public?.gid;
-    const maxSize = raw?.maxsize ? Number(raw.maxsize) : undefined;
-    out.push({
-      depotId,
-      name: raw?.name,
-      manifestId,
-      maxSize,
-    });
-  }
-
-  return out;
+  return (await getAppInfo(client, appId)).depots;
 }

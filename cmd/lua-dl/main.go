@@ -378,15 +378,23 @@ func prepareCandidates(candidates []target, depotFilter map[uint32]bool) []targe
 	return kept
 }
 
+// resolveManifestID picks which manifest ID to download for a depot.
+//
+// The lua file's manifest ID is paired with a known-good .manifest binary in
+// ryuu.lol's bundle (they're served together). PICS may report a newer
+// manifest that nobody has archived yet, which would leave us unable to
+// download. So prefer the lua ID when set; only fall back to PICS for
+// lua-less depots (shared system depots, etc).
 func resolveManifestID(pd steam.Depot, inPICS bool, luaManifest string) uint64 {
+	if luaManifest != "" {
+		if n, err := strconv.ParseUint(luaManifest, 10, 64); err == nil && n != 0 {
+			return n
+		}
+	}
 	if inPICS && pd.ManifestID != 0 {
 		return pd.ManifestID
 	}
-	if luaManifest == "" {
-		return 0
-	}
-	n, _ := strconv.ParseUint(luaManifest, 10, 64)
-	return n
+	return 0
 }
 
 // enrichNames fills in missing names by looking up each depot id as an app id.
@@ -425,33 +433,62 @@ func selectTargets(candidates []target, depotFilter map[uint32]bool, selectAll b
 		return candidates, nil
 	}
 
+	// Split out core depots — they're always included and never shown in the
+	// picker. Optional depots (locales, DLCs, etc) are what the user chooses.
+	var core, optional []target
+	for _, c := range candidates {
+		if c.kind == kindCore {
+			core = append(core, c)
+		} else {
+			optional = append(optional, c)
+		}
+	}
+
+	// If there's nothing to pick, skip the picker entirely and just download
+	// the core set.
+	if len(optional) == 0 {
+		return core, nil
+	}
+
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return nil, fmt.Errorf("no TTY for interactive picker — pass --all or --depots 1,2,3")
 	}
-	items := make([]picker.Item, len(candidates))
-	for i, c := range candidates {
-		// Default-on: core (locked) + the user's language (unlocked).
-		defaultOn := c.kind == kindCore || c.kind == kindUserLocale
+	items := make([]picker.Item, len(optional))
+	for i, c := range optional {
 		items[i] = picker.Item{
 			Label:    candidateLabel(c),
 			Hint:     candidateHint(c),
 			Tag:      candidateTag(c),
-			Selected: defaultOn,
-			Locked:   c.kind == kindCore,
+			Selected: c.kind == kindUserLocale, // default-on user's language
 		}
 	}
-	title := fmt.Sprintf("\r\n%s (%d) — select depots to download:", info.Name, parsed.AppID)
+	title := fmt.Sprintf("\r\n%s (%d) — %s\r\nSelect optional depots:",
+		info.Name, parsed.AppID, coreSummary(core))
 	picked, err := picker.Run(title, items)
 	if err != nil {
 		return nil, err
 	}
-	var out []target
+	out := append([]target{}, core...)
 	for i, it := range picked {
 		if it.Selected {
-			out = append(out, candidates[i])
+			out = append(out, optional[i])
 		}
 	}
 	return out, nil
+}
+
+func coreSummary(core []target) string {
+	if len(core) == 0 {
+		return "no core depots"
+	}
+	var size uint64
+	for _, c := range core {
+		size += c.size
+	}
+	if size > 0 {
+		return fmt.Sprintf("core: %d depot(s), %.2f GB (always included)", len(core), float64(size)/1e9)
+	}
+	return fmt.Sprintf("core: %d depot(s) (always included)", len(core))
 }
 
 func candidateTag(c target) string {

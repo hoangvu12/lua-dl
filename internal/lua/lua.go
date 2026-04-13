@@ -28,8 +28,11 @@ type ParseResult struct {
 
 var (
 	zeroWidth = regexp.MustCompile("[\u200B-\u200D\uFEFF\u2060]")
-	addRe     = regexp.MustCompile(`addappid\s*\(\s*(\d+)\s*,\s*\d+\s*,\s*"([0-9a-fA-F]+)"\s*\)[ \t]*(?:--[ \t]*([^\n]*))?`)
-	setRe     = regexp.MustCompile(`setManifestid\s*\(\s*(\d+)\s*,\s*"(\d+)"`)
+	// Keyless form declares the owning app: addappid(12345)
+	addAppRe = regexp.MustCompile(`addappid\s*\(\s*(\d+)\s*\)`)
+	// Keyed form declares a depot + its AES key.
+	addRe = regexp.MustCompile(`addappid\s*\(\s*(\d+)\s*,\s*\d+\s*,\s*"([0-9a-fA-F]+)"\s*\)[ \t]*(?:--[ \t]*([^\n]*))?`)
+	setRe = regexp.MustCompile(`setManifestid\s*\(\s*(\d+)\s*,\s*"(\d+)"`)
 )
 
 func Parse(source string) (*ParseResult, error) {
@@ -89,12 +92,23 @@ func Parse(source string) (*ParseResult, error) {
 		}
 	}
 
-	// First entry with a key is the "main" app.
+	// App id: prefer the first keyless addappid(N) declaration. For files
+	// that omit it (older exports), fall back to the first keyed depot id.
+	// Using a keyed id as the app id is wrong for games whose base depot id
+	// differs from the app id (e.g. 814380 Sekiro: app 814380, base depot
+	// 814381) and makes PICS lookups return nothing.
 	var appID uint32
-	for _, d := range compact {
-		if d.Key != "" {
-			appID = d.ID
-			break
+	if m := addAppRe.FindStringSubmatch(clean); m != nil {
+		if id, err := strconv.ParseUint(m[1], 10, 32); err == nil {
+			appID = uint32(id)
+		}
+	}
+	if appID == 0 {
+		for _, d := range compact {
+			if d.Key != "" {
+				appID = d.ID
+				break
+			}
 		}
 	}
 	if appID == 0 {

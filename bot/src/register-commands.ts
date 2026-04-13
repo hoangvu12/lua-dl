@@ -23,9 +23,17 @@ const commands = [
       opt
         .setName("appid")
         .setDescription("Steam App ID (e.g. 431960 for Wallpaper Engine)")
-        .setRequired(true)
+        .setRequired(false)
         .setMinValue(1)
         .setMaxValue(10_000_000)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("query")
+        .setDescription("Search by game name — shows picker with images")
+        .setRequired(false)
+        .setMinLength(2)
+        .setMaxLength(100)
     )
     .toJSON(),
 ];

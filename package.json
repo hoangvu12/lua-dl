@@ -1,0 +1,15 @@
+{
+  "name": "lua-dl",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "parse": "bun run src/cli.ts parse",
+    "probe": "bun run src/cli.ts probe"
+  },
+  "dependencies": {
+    "steam-user": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

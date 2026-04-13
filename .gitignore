@@ -1,6 +1,11 @@
 node_modules/
 .claude/
 out/
+WE-go-*/
+Wallpaper Engine/
+.lua-dl-state.json
+/lua-dl
+/lua-dl.exe
 bun.lock
 bun.lockb
 *.log

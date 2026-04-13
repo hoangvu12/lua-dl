@@ -4,7 +4,12 @@
 //
 //	lua-dl parse    <file.lua|appid>            [-v]
 //	lua-dl probe    <file.lua|appid>            [-v]
-//	lua-dl download <file.lua|appid> [--depot N] [--out DIR] [-v]
+//	lua-dl download <file.lua|appid> [--depots 1,2,3|--all] [--out DIR] [-v]
+//
+// Depot selection:
+//   - no flag + TTY → interactive picker (base depot pre-selected, required)
+//   - --all         → everything in the lua file
+//   - --depots LIST → comma-separated depot IDs (base always included)
 //
 // A bare appid is treated as a source only if the argument is pure digits and
 // no file of that name exists on disk.
@@ -18,20 +23,54 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"runtime"
+	"slices"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Lucino772/envelop/pkg/steam/steamcdn"
+	"golang.org/x/term"
 
 	"github.com/hoangvu12/lua-dl/internal/cdn"
 	"github.com/hoangvu12/lua-dl/internal/lua"
+	"github.com/hoangvu12/lua-dl/internal/picker"
 	"github.com/hoangvu12/lua-dl/internal/resolver"
 	"github.com/hoangvu12/lua-dl/internal/sanitize"
 	"github.com/hoangvu12/lua-dl/internal/state"
 	"github.com/hoangvu12/lua-dl/internal/steam"
 	"github.com/hoangvu12/lua-dl/internal/verbose"
 )
+
+const targetLang = "english"
+
+// depotKind classifies a depot into exactly one bucket, in priority order.
+// The numeric order is also the picker sort order (core at top).
+type depotKind int
+
+const (
+	kindCore        depotKind = iota // base content, locked-on, required to run
+	kindUserLocale                   // language pack matching targetLang
+	kindOtherLocale                  // language pack for some other language
+	kindDLC                          // DLC, optional
+	kindWrongOS                      // binaries for a different OS
+	kindOther                        // anything left (e.g. lowviolence variants)
+)
+
+// target is a downloadable depot paired with everything we need to display
+// and classify it. Filled by buildCandidates; consumed by selectTargets.
+type target struct {
+	depotID    uint32
+	manifestID uint64
+	key        []byte
+	name       string
+	size       uint64
+	kind       depotKind
+	language   string
+	oslist     []string
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -48,38 +87,16 @@ func run() error {
 	cmd := os.Args[1]
 	arg := os.Args[2]
 	rest := os.Args[3:]
+
 	if hasFlag(rest, "-v") || hasFlag(rest, "--verbose") {
 		verbose.Set(true)
-	}
-	// Silence envelop's "Following packet was not handled" log.Println spam.
-	// These are cosmetic — envelop routes unknown incoming messages through
-	// the standard log package. Dropping them keeps our output clean.
-	if !verbose.Enabled() {
-		log.SetOutput(io.Discard)
 	}
 
 	ctx := context.Background()
 
-	// 1) Load source (lua text) — from file or by-appid.
-	var source, sourceLabel string
-	if isDigits(arg) && !fileExists(arg) {
-		appID64, _ := strconv.ParseUint(arg, 10, 32)
-		appID := uint32(appID64)
-		resCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		rl, err := resolver.ResolveLua(resCtx, appID)
-		cancel()
-		if err != nil {
-			return err
-		}
-		source = rl.Text
-		sourceLabel = fmt.Sprintf("appid %d via %s", appID, rl.Source)
-	} else {
-		b, err := os.ReadFile(arg)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", arg, err)
-		}
-		source = string(b)
-		sourceLabel = arg
+	source, sourceLabel, err := loadSource(ctx, arg)
+	if err != nil {
+		return err
 	}
 
 	parsed, err := lua.Parse(source)
@@ -87,79 +104,118 @@ func run() error {
 		return err
 	}
 
-	// Parse subcommand prints the full table. Other subcommands use the
-	// parsed data silently (or under -v via resolver/cdn chatter).
 	if cmd == "parse" || verbose.Enabled() {
-		fmt.Printf("\n== Parsed %s ==\n", sourceLabel)
-		fmt.Printf("App ID: %d\n", parsed.AppID)
-		fmt.Printf("Entries: %d\n", len(parsed.Depots))
-		for _, d := range parsed.Depots {
-			keyDisp := "(no key)"
-			if d.Key != "" {
-				keyDisp = d.Key[:12] + "…"
-			}
-			manif := ""
-			if d.ManifestID != "" {
-				manif = " manifest=" + d.ManifestID
-			}
-			label := ""
-			if d.Label != "" {
-				label = " — " + d.Label
-			}
-			fmt.Printf("  %d  key=%s%s%s\n", d.ID, keyDisp, manif, label)
-		}
+		printParsed(sourceLabel, parsed)
 	}
-
 	if cmd == "parse" {
 		return nil
 	}
 
-	// 2) Steam connection — shared by probe and download.
-	client := steam.NewClient()
-	if err := client.Connect(30 * time.Second); err != nil {
-		return fmt.Errorf("steam connect: %w", err)
-	}
-	if err := client.LogInAnonymously(); err != nil {
-		return fmt.Errorf("steam login: %w", err)
+	client, err := connectSteam()
+	if err != nil {
+		return err
 	}
 
-	if cmd == "probe" {
-		fmt.Println("\n== Probing Steam for live manifest IDs ==")
-		info, err := client.GetAppInfo(parsed.AppID)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Steam returned %d depot entries:\n", len(info.Depots))
-		for _, d := range info.Depots {
-			hasKey := "  "
-			for _, lua := range parsed.Depots {
-				if lua.ID == d.DepotID && lua.Key != "" {
-					hasKey = "✓ key"
-					break
-				}
-			}
-			sz := ""
-			if d.MaxSize > 0 {
-				sz = fmt.Sprintf(" (%.2f GB)", float64(d.MaxSize)/1e9)
-			}
-			fmt.Printf("  %s  %d  manifest=%d%s  %s\n", hasKey, d.DepotID, d.ManifestID, sz, d.Name)
-		}
-		return nil
-	}
-
-	if cmd != "download" {
+	switch cmd {
+	case "probe":
+		return cmdProbe(client, parsed)
+	case "download":
+		return cmdDownload(ctx, client, parsed, rest)
+	default:
 		usage()
 		os.Exit(1)
+		return nil
 	}
+}
 
-	// 3) Download.
-	onlyDepot := uint32(0)
-	if v := flagVal(rest, "--depot"); v != "" {
-		n, err := strconv.ParseUint(v, 10, 32)
+// loadSource reads the lua source either from a file on disk or, if arg is
+// a bare appid, by resolving it through the lua-dl resolver mirrors.
+func loadSource(ctx context.Context, arg string) (source, label string, err error) {
+	if isDigits(arg) && !fileExists(arg) {
+		appID64, _ := strconv.ParseUint(arg, 10, 32)
+		appID := uint32(appID64)
+		resCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		rl, err := resolver.ResolveLua(resCtx, appID)
 		if err != nil {
-			return fmt.Errorf("--depot: %w", err)
+			return "", "", err
 		}
-		onlyDepot = uint32(n)
+		return rl.Text, fmt.Sprintf("appid %d via %s", appID, rl.Source), nil
+	}
+	b, err := os.ReadFile(arg)
+	if err != nil {
+		return "", "", fmt.Errorf("read %s: %w", arg, err)
+	}
+	return string(b), arg, nil
+}
+
+func printParsed(label string, parsed *lua.ParseResult) {
+	fmt.Printf("\n== Parsed %s ==\n", label)
+	fmt.Printf("App ID: %d\n", parsed.AppID)
+	fmt.Printf("Entries: %d\n", len(parsed.Depots))
+	for _, d := range parsed.Depots {
+		keyDisp := "(no key)"
+		if d.Key != "" {
+			keyDisp = d.Key[:12] + "…"
+		}
+		manif := ""
+		if d.ManifestID != "" {
+			manif = " manifest=" + d.ManifestID
+		}
+		label := ""
+		if d.Label != "" {
+			label = " — " + d.Label
+		}
+		fmt.Printf("  %d  key=%s%s%s\n", d.ID, keyDisp, manif, label)
+	}
+}
+
+func connectSteam() (*steam.Client, error) {
+	// Silence envelop's "Following packet was not handled" log.Println spam.
+	// These are cosmetic — envelop routes unknown incoming messages through
+	// the standard log package. Dropping them keeps our output clean.
+	if !verbose.Enabled() {
+		log.SetOutput(io.Discard)
+	}
+	client := steam.NewClient()
+	if err := client.Connect(30 * time.Second); err != nil {
+		return nil, fmt.Errorf("steam connect: %w", err)
+	}
+	if err := client.LogInAnonymously(); err != nil {
+		return nil, fmt.Errorf("steam login: %w", err)
+	}
+	return client, nil
+}
+
+func cmdProbe(client *steam.Client, parsed *lua.ParseResult) error {
+	fmt.Println("\n== Probing Steam for live manifest IDs ==")
+	info, err := client.GetAppInfo(parsed.AppID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Steam returned %d depot entries:\n", len(info.Depots))
+	for _, d := range info.Depots {
+		hasKey := "  "
+		for _, le := range parsed.Depots {
+			if le.ID == d.DepotID && le.Key != "" {
+				hasKey = "✓ key"
+				break
+			}
+		}
+		sz := ""
+		if d.MaxSize > 0 {
+			sz = fmt.Sprintf(" (%.2f GB)", float64(d.MaxSize)/1e9)
+		}
+		fmt.Printf("  %s  %d  manifest=%d%s  %s\n", hasKey, d.DepotID, d.ManifestID, sz, d.Name)
+	}
+	return nil
+}
+
+func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseResult, rest []string) error {
+	selectAll := hasFlag(rest, "--all")
+	depotFilter, err := parseDepotFilter(flagVal(rest, "--depots"))
+	if err != nil {
+		return err
 	}
 
 	info, err := client.GetAppInfo(parsed.AppID)
@@ -171,83 +227,276 @@ func run() error {
 	if outDir == "" {
 		outDir = filepath.Join(".", sanitize.FolderName(info.Name))
 	}
-	fmt.Fprintf(os.Stderr, "\n%s (%d)\nDownloading to %s\n\n", info.Name, parsed.AppID, outDir)
+
+	candidates, err := buildCandidates(parsed, info)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("no downloadable depots found in lua file")
+	}
+	enrichNames(client, candidates)
+	candidates = prepareCandidates(candidates, depotFilter)
+
+	targets, err := selectTargets(candidates, depotFilter, selectAll, info, parsed)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no depots selected")
+	}
+
+	var totalPick uint64
+	for _, t := range targets {
+		totalPick += t.size
+	}
+	sizeHint := ""
+	if totalPick > 0 {
+		sizeHint = fmt.Sprintf(" (~%.2f GB)", float64(totalPick)/1e9)
+	}
+	fmt.Fprintf(os.Stderr, "\n%s (%d)\n%d depot(s)%s → %s\n\n",
+		info.Name, parsed.AppID, len(targets), sizeHint, outDir)
 
 	stateCache := state.New(filepath.Join(outDir, ".lua-dl-state.json"))
+	return runDownloads(ctx, client, targets, outDir, parsed.AppID, stateCache)
+}
 
-	// Build a lookup of lua depot keys.
-	luaByID := make(map[uint32]lua.DepotEntry, len(parsed.Depots))
-	for _, d := range parsed.Depots {
-		luaByID[d.ID] = d
+func parseDepotFilter(v string) (map[uint32]bool, error) {
+	if v == "" {
+		return nil, nil
 	}
-
-	// Decide manifest id per depot. Prefer PICS (live); fall back to lua's
-	// setManifestid value when PICS has none (common for DLCs not owned by
-	// the main app).
-	type target struct {
-		depotID    uint32
-		manifestID uint64
-		key        []byte
+	out := map[uint32]bool{}
+	for _, s := range strings.Split(v, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(s, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("--depots: bad id %q: %w", s, err)
+		}
+		out[uint32(n)] = true
 	}
-	var targets []target
+	return out, nil
+}
 
-	// First pass: PICS depots that have a lua key.
-	picsSeen := make(map[uint32]bool)
+// buildCandidates walks the lua entries that have a key and a resolvable
+// manifest id, enriching each with PICS metadata (name/size/filter flags)
+// when available.
+func buildCandidates(parsed *lua.ParseResult, info *steam.AppInfo) ([]target, error) {
+	picsByID := make(map[uint32]steam.Depot, len(info.Depots))
 	for _, d := range info.Depots {
-		picsSeen[d.DepotID] = true
-		if onlyDepot != 0 && d.DepotID != onlyDepot {
-			continue
-		}
-		le, ok := luaByID[d.DepotID]
-		if !ok || le.Key == "" {
-			continue
-		}
-		if d.ManifestID == 0 {
-			continue
-		}
-		kb, err := hex.DecodeString(le.Key)
-		if err != nil {
-			return fmt.Errorf("depot %d: bad lua key: %w", d.DepotID, err)
-		}
-		targets = append(targets, target{d.DepotID, d.ManifestID, kb})
+		picsByID[d.DepotID] = d
 	}
-	// Second pass: lua-only depots (e.g. DLCs not visible via parent PICS).
+
+	targetOS := steamOS()
+	var out []target
 	for _, le := range parsed.Depots {
-		if picsSeen[le.ID] {
-			continue
-		}
-		if le.Key == "" || le.ManifestID == "" {
-			continue
-		}
-		if onlyDepot != 0 && le.ID != onlyDepot {
-			continue
-		}
-		mid, err := strconv.ParseUint(le.ManifestID, 10, 64)
-		if err != nil {
+		if le.Key == "" {
 			continue
 		}
 		kb, err := hex.DecodeString(le.Key)
 		if err != nil {
+			return nil, fmt.Errorf("depot %d: bad lua key: %w", le.ID, err)
+		}
+		pd, inPICS := picsByID[le.ID]
+		mid := resolveManifestID(pd, inPICS, le.ManifestID)
+		if mid == 0 {
 			continue
 		}
-		targets = append(targets, target{le.ID, mid, kb})
+		out = append(out, target{
+			depotID:    le.ID,
+			manifestID: mid,
+			key:        kb,
+			name:       pd.Name,
+			size:       pd.MaxSize,
+			language:   pd.Language,
+			oslist:     pd.OSList,
+			kind:       classify(pd, inPICS, targetOS),
+		})
+	}
+	return out, nil
+}
+
+// classify maps a PICS depot entry to a single depotKind bucket. Follows
+// DepotDownloader's install filter (ContentDownloader.cs): a depot is core
+// (always installed) only when it has no language, no DLC link, matches the
+// user's OS, and isn't a lowviolence variant. Anything else is optional.
+//
+// lua-only depots (not in PICS) are treated as DLCs — they're almost always
+// DLCs the parent app doesn't list for anonymous access.
+func classify(pd steam.Depot, inPICS bool, targetOS string) depotKind {
+	wrongOS := len(pd.OSList) > 0 && !slices.Contains(pd.OSList, targetOS)
+	switch {
+	case pd.Language == targetLang:
+		return kindUserLocale
+	case pd.Language != "":
+		return kindOtherLocale
+	case pd.DLCAppID != 0 || !inPICS:
+		return kindDLC
+	case wrongOS:
+		return kindWrongOS
+	case pd.LowViolence:
+		return kindOther
+	}
+	return kindCore
+}
+
+// prepareCandidates drops wrong-OS depots (unless force-added via --depots),
+// sorts by kind for a scannable picker, and installs a safety-net core if
+// classification found none.
+func prepareCandidates(candidates []target, depotFilter map[uint32]bool) []target {
+	// Drop other-OS depots entirely — lua-dl is Windows-only so macOS/Linux
+	// binaries are dead weight. --depots can still force-add them by id.
+	kept := candidates[:0]
+	for _, c := range candidates {
+		if c.kind == kindWrongOS && !depotFilter[c.depotID] {
+			continue
+		}
+		kept = append(kept, c)
 	}
 
-	if len(targets) == 0 {
-		return fmt.Errorf("no downloadable depots matched filter")
+	sort.SliceStable(kept, func(i, j int) bool {
+		if kept[i].kind != kept[j].kind {
+			return kept[i].kind < kept[j].kind
+		}
+		return kept[i].depotID < kept[j].depotID
+	})
+
+	// Safety net: if nothing classified as core (PICS may be sparse on older
+	// games), promote the smallest-id depot so at least one thing is locked.
+	hasCore := false
+	for _, c := range kept {
+		if c.kind == kindCore {
+			hasCore = true
+			break
+		}
+	}
+	if !hasCore && len(kept) > 0 {
+		kept[0].kind = kindCore
+	}
+	return kept
+}
+
+func resolveManifestID(pd steam.Depot, inPICS bool, luaManifest string) uint64 {
+	if inPICS && pd.ManifestID != 0 {
+		return pd.ManifestID
+	}
+	if luaManifest == "" {
+		return 0
+	}
+	n, _ := strconv.ParseUint(luaManifest, 10, 64)
+	return n
+}
+
+// enrichNames fills in missing names by looking up each depot id as an app id.
+// Steam DLC appids usually equal the depot id, so this often pulls back a
+// real title ("Wallpaper Engine — Workshop") without the parent app having
+// to list the DLC explicitly. Best-effort, runs in parallel.
+func enrichNames(client *steam.Client, candidates []target) {
+	var wg sync.WaitGroup
+	for i := range candidates {
+		c := &candidates[i]
+		if c.name != "" {
+			continue
+		}
+		wg.Add(1)
+		go func(c *target) {
+			defer wg.Done()
+			if sub, err := client.GetAppInfo(c.depotID); err == nil && sub.Name != "" {
+				c.name = sub.Name
+			}
+		}(c)
+	}
+	wg.Wait()
+}
+
+func selectTargets(candidates []target, depotFilter map[uint32]bool, selectAll bool, info *steam.AppInfo, parsed *lua.ParseResult) ([]target, error) {
+	switch {
+	case depotFilter != nil:
+		var out []target
+		for _, c := range candidates {
+			if c.kind == kindCore || depotFilter[c.depotID] {
+				out = append(out, c)
+			}
+		}
+		return out, nil
+	case selectAll:
+		return candidates, nil
 	}
 
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil, fmt.Errorf("no TTY for interactive picker — pass --all or --depots 1,2,3")
+	}
+	items := make([]picker.Item, len(candidates))
+	for i, c := range candidates {
+		// Default-on: core (locked) + the user's language (unlocked).
+		defaultOn := c.kind == kindCore || c.kind == kindUserLocale
+		items[i] = picker.Item{
+			Label:    candidateLabel(c),
+			Hint:     candidateHint(c),
+			Tag:      candidateTag(c),
+			Selected: defaultOn,
+			Locked:   c.kind == kindCore,
+		}
+	}
+	title := fmt.Sprintf("\r\n%s (%d) — select depots to download:", info.Name, parsed.AppID)
+	picked, err := picker.Run(title, items)
+	if err != nil {
+		return nil, err
+	}
+	var out []target
+	for i, it := range picked {
+		if it.Selected {
+			out = append(out, candidates[i])
+		}
+	}
+	return out, nil
+}
+
+func candidateTag(c target) string {
+	switch c.kind {
+	case kindCore:
+		return "[core]"
+	case kindUserLocale, kindOtherLocale:
+		return "[" + c.language + "]"
+	case kindDLC:
+		return "[DLC]"
+	case kindWrongOS:
+		if len(c.oslist) > 0 {
+			return "[" + strings.Join(c.oslist, "/") + "]"
+		}
+		return "[other OS]"
+	}
+	return ""
+}
+
+func candidateHint(c target) string {
+	if c.size == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.2f GB", float64(c.size)/1e9)
+}
+
+func candidateLabel(c target) string {
+	if c.name != "" {
+		return fmt.Sprintf("%d  %s", c.depotID, c.name)
+	}
+	return strconv.FormatUint(uint64(c.depotID), 10)
+}
+
+func runDownloads(ctx context.Context, client *steam.Client, targets []target, outDir string, appID uint32, stateCache *state.Cache) error {
 	dl, err := cdn.NewDownloader(client, stateCache)
 	if err != nil {
 		return err
 	}
 
-	overallStart := time.Now()
+	start := time.Now()
 	for _, t := range targets {
 		verbose.Vlog("\n[depot %d] manifest=%d", t.depotID, t.manifestID)
 
 		mCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		rm, err := resolver.ResolveManifest(mCtx, parsed.AppID, t.depotID, t.manifestID)
+		rm, err := resolver.ResolveManifest(mCtx, appID, t.depotID, t.manifestID)
 		cancel()
 		if err != nil {
 			_ = stateCache.Flush()
@@ -261,7 +510,7 @@ func run() error {
 		}
 
 		req := cdn.DepotRequest{
-			AppID:      parsed.AppID,
+			AppID:      appID,
 			DepotID:    t.depotID,
 			ManifestID: t.manifestID,
 			DepotKey:   t.key,
@@ -274,7 +523,7 @@ func run() error {
 		}
 	}
 
-	elapsed := time.Since(overallStart).Seconds()
+	elapsed := time.Since(start).Seconds()
 	if elapsed > 0.5 {
 		fmt.Fprintf(os.Stderr, "\nDone in %.1fs.\n", elapsed)
 	} else {
@@ -283,9 +532,26 @@ func run() error {
 	return stateCache.Flush()
 }
 
-var digitsRe = regexp.MustCompile(`^\d+$`)
+// steamOS maps Go's GOOS to Steam's config.oslist tokens. Steam uses "macos"
+// where Go uses "darwin"; "windows" and "linux" match.
+func steamOS() string {
+	if runtime.GOOS == "darwin" {
+		return "macos"
+	}
+	return runtime.GOOS
+}
 
-func isDigits(s string) bool { return digitsRe.MatchString(s) }
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
@@ -311,5 +577,5 @@ func flagVal(args []string, name string) string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: lua-dl <parse|probe|download> <file.lua|appid> [--depot ID] [--out DIR] [-v]")
+	fmt.Fprintln(os.Stderr, "Usage: lua-dl <parse|probe|download> <file.lua|appid> [--all|--depots 1,2,3] [--out DIR] [-v]")
 }

@@ -17,6 +17,7 @@ interface StoreSearchRaw {
     type: string;
     name: string;
     id: number;
+    tiny_image?: string;
     price?: { currency: string; final: number };
     platforms?: { windows?: boolean; mac?: boolean; linux?: boolean };
   }>;
@@ -49,13 +50,46 @@ export async function searchSteamApps(
     .map((it) => ({
       id: it.id,
       name: it.name,
-      headerImage: `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${it.id}/header.jpg`,
+      // Filled in below via appdetails — the storesearch API only returns
+      // a 231x87 capsule, too small for a nice picker embed.
+      headerImage: "",
       priceText: formatPrice(it.price),
       platforms: formatPlatforms(it.platforms),
     }));
 
+  // Fetch proper header images in parallel. appdetails returns header_image
+  // which is 460x215 and renders nicely in a Discord embed.
+  await Promise.all(
+    items.map(async (it) => {
+      it.headerImage = await fetchHeaderImage(it.id);
+    })
+  );
+
   cache.set(key, { at: Date.now(), items });
   return items.slice(0, limit);
+}
+
+const headerCache = new Map<number, string>();
+
+async function fetchHeaderImage(appid: number): Promise<string> {
+  const cached = headerCache.get(appid);
+  if (cached !== undefined) return cached;
+  try {
+    const res = await fetch(
+      `https://store.steampowered.com/api/appdetails?appids=${appid}&cc=us&l=en&filters=basic`,
+      { signal: AbortSignal.timeout(4000) }
+    );
+    if (!res.ok) return "";
+    const json = (await res.json()) as Record<
+      string,
+      { success?: boolean; data?: { header_image?: string } }
+    >;
+    const url = json[String(appid)]?.data?.header_image ?? "";
+    headerCache.set(appid, url);
+    return url;
+  } catch {
+    return "";
+  }
 }
 
 function formatPrice(p?: { currency: string; final: number }): string {

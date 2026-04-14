@@ -115,17 +115,18 @@ async function sendSearch(
     return;
   }
 
-  const embeds = results.map((r, idx) =>
-    new EmbedBuilder()
+  const embeds = results.map((r, idx) => {
+    const e = new EmbedBuilder()
       .setTitle(`${idx + 1}. ${r.name}`)
       .setURL(`https://store.steampowered.com/app/${r.id}/`)
-      .setImage(r.headerImage)
       .setFooter({
         text: [`App ${r.id}`, r.priceText, r.platforms]
           .filter(Boolean)
           .join("  •  "),
-      })
-  );
+      });
+    if (r.headerImage) e.setImage(r.headerImage);
+    return e;
+  });
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`${PICK_PREFIX}${i.user.id}`)

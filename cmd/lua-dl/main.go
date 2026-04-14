@@ -36,6 +36,7 @@ import (
 
 	"github.com/hoangvu12/lua-dl/internal/cdn"
 	"github.com/hoangvu12/lua-dl/internal/lua"
+	"github.com/hoangvu12/lua-dl/internal/onlinefix"
 	"github.com/hoangvu12/lua-dl/internal/picker"
 	"github.com/hoangvu12/lua-dl/internal/resolver"
 	"github.com/hoangvu12/lua-dl/internal/sanitize"
@@ -258,7 +259,13 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 		info.Name, parsed.AppID, len(targets), sizeHint, outDir)
 
 	stateCache := state.New(filepath.Join(outDir, ".lua-dl-state.json"))
-	return runDownloads(ctx, client, targets, outDir, parsed.AppID, stateCache)
+	if err := runDownloads(ctx, client, targets, outDir, parsed.AppID, stateCache); err != nil {
+		return err
+	}
+	// Best-effort: offer to install a community Online-Fix if one exists for
+	// this title. Never blocks the successful depot download — any failure
+	// inside Offer is printed and swallowed.
+	return onlinefix.Offer(ctx, info.Name, outDir)
 }
 
 func parseDepotFilter(v string) (map[uint32]bool, error) {

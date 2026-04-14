@@ -37,6 +37,13 @@ const (
 	// Shared chunk semaphore across all files in a depot. Matches the TS
 	// CONCURRENCY=24 setting that saturates a ~100 Mbps link to Steam SG.
 	maxParallelChunks = 24
+	// Cap on files in flight. The inner chunk semaphore already bounds real
+	// parallelism at maxParallelChunks, so the outer file pool just needs to
+	// be large enough that the chunk sem never starves. Without this cap,
+	// AAA games with 100k+ files spawn 100k+ outer goroutines up front, each
+	// holding a `.partial` file descriptor, which melts memory and hits the
+	// process file-handle ceiling.
+	maxParallelFiles = 32
 	// Upper bound on retries per chunk before giving up.
 	maxChunkAttempts = 4
 )
@@ -121,6 +128,7 @@ func (d *Downloader) DownloadDepot(ctx context.Context, req DepotRequest) error 
 
 	chunkSem := make(chan struct{}, maxParallelChunks)
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxParallelFiles)
 
 	// Count real files + total bytes upfront. Manifest entries include
 	// directories — filter those.

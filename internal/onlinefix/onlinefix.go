@@ -32,6 +32,7 @@ import (
 	"golang.org/x/text/encoding/charmap"
 
 	"github.com/hoangvu12/lua-dl/internal/picker"
+	"github.com/hoangvu12/lua-dl/internal/ui"
 )
 
 // Baked subscriber session. Rotate both consts when errors start flashing
@@ -67,24 +68,27 @@ func Offer(ctx context.Context, gameName, gameDir string) error {
 
 	results, err := search(ctx, client, gameName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n[online-fix] search failed: %v\n", err)
+		ui.Phase("Online-Fix")
+		ui.LastStep(fmt.Sprintf("search failed: %v", err))
 		return nil
 	}
 	if len(results) == 0 {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "\n[online-fix] multiplayer fix available for this game.\n")
-	if !askYesNo("Install Online-Fix now? [Y/n]: ") {
+	ui.Phase("Online-Fix · multiplayer fix available")
+	if !askYesNo("  Install now? [Y/n]: ") {
+		ui.Note("skipped")
 		return nil
 	}
 
 	chosen, ok := pick(gameName, results)
 	if !ok {
+		ui.Note("cancelled")
 		return nil
 	}
 	if err := apply(ctx, client, chosen.PageURL, gameDir); err != nil {
-		fmt.Fprintf(os.Stderr, "\n[online-fix] failed: %v\n", err)
+		ui.LastStep(fmt.Sprintf("failed: %v", err))
 	}
 	return nil
 }

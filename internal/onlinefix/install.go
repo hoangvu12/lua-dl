@@ -9,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/nwaples/rardecode/v2"
+
+	"github.com/hoangvu12/lua-dl/internal/ui"
 )
 
 // apply runs the download+extract pipeline for a picked game: extract its
@@ -24,7 +27,6 @@ func apply(ctx context.Context, client *http.Client, pageURL, gameDir string) er
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[online-fix] upload folder: %s\n", slug)
 
 	// The uploads origin sets an `online_fix_auth` cookie on the first
 	// contact with the game folder listing; we need that cookie on the
@@ -50,20 +52,19 @@ func apply(ctx context.Context, client *http.Client, pageURL, gameDir string) er
 	defer os.RemoveAll(tmpRoot)
 
 	for _, name := range rars {
-		fmt.Fprintf(os.Stderr, "[online-fix] downloading %s\n", name)
 		rarURL := fixListURL + strings.ReplaceAll(name, " ", "%20")
-		if err := downloadRAR(ctx, client, rarURL, pageURL, filepath.Join(tmpRoot, name)); err != nil {
+		if err := downloadRAR(ctx, client, rarURL, pageURL, filepath.Join(tmpRoot, name), name); err != nil {
 			return fmt.Errorf("download %s: %w", name, err)
 		}
 	}
 
 	primary := filepath.Join(tmpRoot, primaryRAR(rars))
-	fmt.Fprintf(os.Stderr, "[online-fix] extracting %s\n", filepath.Base(primary))
+	ui.Step(fmt.Sprintf("extracting %s", filepath.Base(primary)))
 	n, err := extractOver(primary, gameDir)
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[online-fix] applied %d file(s) to %s\n", n, gameDir)
+	ui.LastStep(fmt.Sprintf("applied %d %s", n, ui.Plural(n, "file", "files")))
 	return nil
 }
 
@@ -97,7 +98,7 @@ func listRARs(ctx context.Context, client *http.Client, listURL, referer string)
 	return out, nil
 }
 
-func downloadRAR(ctx context.Context, client *http.Client, url, referer, dst string) error {
+func downloadRAR(ctx context.Context, client *http.Client, url, referer, dst, displayName string) error {
 	res, err := get(ctx, client, url, referer)
 	if err != nil {
 		return err
@@ -111,7 +112,18 @@ func downloadRAR(ctx context.Context, client *http.Client, url, referer, dst str
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, res.Body)
+
+	// Content-Length lets the bar show a percentage. If the server omits it
+	// (rare for static .rar) the bar still shows bytes/rate, just no total.
+	var total uint64
+	if cl := res.Header.Get("Content-Length"); cl != "" {
+		if n, err := strconv.ParseUint(cl, 10, 64); err == nil {
+			total = n
+		}
+	}
+	pr := ui.NewProgressReader(res.Body, total, "downloading "+displayName)
+	defer pr.Done()
+	_, err = io.Copy(f, pr)
 	return err
 }
 

@@ -236,18 +236,20 @@ func drawProgress(bytes uint64, files int64, totalBytes uint64, totalFiles int64
 		pct = 100
 	}
 
-	const barW = 24
+	const barW = 20
 	filled := int(pct / 100 * barW)
 	if filled > barW {
 		filled = barW
 	}
-	bar := strings.Repeat("#", filled) + strings.Repeat("-", barW-filled)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
 
 	mb := float64(bytes) / 1e6
 	totalMB := float64(totalBytes) / 1e6
 
 	_ = depotID // kept in signature for future multi-depot detail; unused here
-	line := fmt.Sprintf("[%s] %5.1f%%  %6.1f/%6.1f MB  %5.1f MB/s  %d/%d files",
+	// Two-space indent so the bar nests visually under the phase header
+	// without pretending to be the last step (other depots may follow).
+	line := fmt.Sprintf("  %s  %5.1f%%  %6.1f / %6.1f MB  %5.1f MB/s  %d/%d files",
 		bar, pct, mb, totalMB, mbps, files, totalFiles)
 	verbose.StatusLine(line)
 }

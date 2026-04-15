@@ -42,6 +42,7 @@ import (
 	"github.com/hoangvu12/lua-dl/internal/sanitize"
 	"github.com/hoangvu12/lua-dl/internal/state"
 	"github.com/hoangvu12/lua-dl/internal/steam"
+	"github.com/hoangvu12/lua-dl/internal/ui"
 	"github.com/hoangvu12/lua-dl/internal/verbose"
 )
 
@@ -251,13 +252,16 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 	for _, t := range targets {
 		totalPick += t.size
 	}
-	sizeHint := ""
+	header := fmt.Sprintf("%s · %d %s",
+		info.Name, len(targets), ui.Plural(len(targets), "depot", "depots"))
 	if totalPick > 0 {
-		sizeHint = fmt.Sprintf(" (~%.2f GB)", float64(totalPick)/1e9)
+		header = fmt.Sprintf("%s · %s · %d %s",
+			info.Name, ui.FormatBytes(totalPick),
+			len(targets), ui.Plural(len(targets), "depot", "depots"))
 	}
-	fmt.Fprintf(os.Stderr, "\n%s (%d)\n%d depot(s)%s → %s\n\n",
-		info.Name, parsed.AppID, len(targets), sizeHint, outDir)
+	ui.Phase(header)
 
+	overallStart := time.Now()
 	stateCache := state.New(filepath.Join(outDir, ".lua-dl-state.json"))
 	if err := runDownloads(ctx, client, targets, outDir, parsed.AppID, stateCache); err != nil {
 		return err
@@ -265,7 +269,11 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 	// Best-effort: offer to install a community Online-Fix if one exists for
 	// this title. Never blocks the successful depot download — any failure
 	// inside Offer is printed and swallowed.
-	return onlinefix.Offer(ctx, info.Name, outDir)
+	_ = onlinefix.Offer(ctx, info.Name, outDir)
+
+	ui.Done(fmt.Sprintf("Done in %s · %s",
+		ui.FormatDuration(time.Since(overallStart)), outDir))
+	return nil
 }
 
 func parseDepotFilter(v string) (map[uint32]bool, error) {
@@ -492,10 +500,11 @@ func coreSummary(core []target) string {
 	for _, c := range core {
 		size += c.size
 	}
+	noun := ui.Plural(len(core), "depot", "depots")
 	if size > 0 {
-		return fmt.Sprintf("core: %d depot(s), %.2f GB (always included)", len(core), float64(size)/1e9)
+		return fmt.Sprintf("core: %d %s, %s (always included)", len(core), noun, ui.FormatBytes(size))
 	}
-	return fmt.Sprintf("core: %d depot(s) (always included)", len(core))
+	return fmt.Sprintf("core: %d %s (always included)", len(core), noun)
 }
 
 func candidateTag(c target) string {
@@ -567,12 +576,7 @@ func runDownloads(ctx context.Context, client *steam.Client, targets []target, o
 		}
 	}
 
-	elapsed := time.Since(start).Seconds()
-	if elapsed > 0.5 {
-		fmt.Fprintf(os.Stderr, "\nDone in %.1fs.\n", elapsed)
-	} else {
-		fmt.Fprintf(os.Stderr, "\nDone (resumed from cache).\n")
-	}
+	_ = start // overall timing is reported by the caller's Done summary
 	return stateCache.Flush()
 }
 

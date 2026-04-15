@@ -21,12 +21,15 @@
  * snappy.
  */
 
+import { fetchAppSizes } from "./steamcmd-net";
+
 export type AppType = "game" | "dlc" | "music" | "demo" | string;
 
 export interface AppChild {
   id: number;
   name: string;
   type: AppType;
+  installBytes?: number;
 }
 
 export interface SteamSearchResult {
@@ -37,6 +40,7 @@ export interface SteamSearchResult {
   platforms: string;
   type: AppType;
   children: AppChild[];
+  installBytes?: number;
 }
 
 interface StoreSearchRaw {
@@ -119,10 +123,15 @@ export async function searchSteamApps(
 
   // Fetch root details (usually already cached from the pivot pass) + their
   // children in parallel. One batch of appdetails calls per unique appid.
+  // Sizes come from steamcmd.net in parallel — best-effort, missing size
+  // just means we don't show it.
   const results: SteamSearchResult[] = [];
   await Promise.all(
     rootIds.map(async (id) => {
-      const det = await fetchAppDetails(id);
+      const [det, sizes] = await Promise.all([
+        fetchAppDetails(id),
+        fetchAppSizes(id),
+      ]);
       if (!det) return;
       const meta = candidateMeta.get(id)!;
       const children = await fetchChildren(det.dlc);
@@ -134,6 +143,7 @@ export async function searchSteamApps(
         platforms: meta.platforms,
         type: det.type,
         children,
+        installBytes: sizes?.installBytes,
       });
     })
   );
@@ -208,9 +218,17 @@ async function fetchChildren(dlcIds: number[]): Promise<AppChild[]> {
   const capped = dlcIds.slice(0, 24);
   const children = await Promise.all(
     capped.map(async (id): Promise<AppChild | null> => {
-      const det = await fetchAppDetails(id);
+      const [det, sizes] = await Promise.all([
+        fetchAppDetails(id),
+        fetchAppSizes(id),
+      ]);
       if (!det) return null;
-      return { id, name: det.name, type: det.type };
+      return {
+        id,
+        name: det.name,
+        type: det.type,
+        installBytes: sizes?.installBytes,
+      };
     })
   );
   return children.filter((c): c is AppChild => !!c);

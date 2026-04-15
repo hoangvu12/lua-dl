@@ -14,15 +14,19 @@ export function pickLang(interactionLocale: string | undefined): Lang {
 
 export function reply(
   lang: Lang,
-  apps: { appid: number; name: string }[]
+  apps: { appid: number; name: string }[],
+  totalSize?: string
 ): string {
   const single = apps.length === 1;
-  const target = single ? `**${apps[0].name}**` : apps.map((a) => `**${a.name}**`).join(", ");
+  const target = single
+    ? `**${apps[0].name}**`
+    : apps.map((a) => `**${a.name}**`).join(", ");
+  const sizeSuffix = totalSize ? ` (${totalSize})` : "";
   if (lang === "vi") {
-    return `File .bat cho ${target}. Bỏ vào 1 folder trống rồi double-click.
+    return `File .bat cho ${target}${sizeSuffix}. Bỏ vào 1 folder trống rồi double-click.
 Lần đầu sẽ tải ~24MB. Nếu Windows báo "protected your PC" thì bấm more info rồi run anyway.`;
   }
-  return `Your .bat for ${target}. Drop it in an empty folder and double-click.
+  return `Your .bat for ${target}${sizeSuffix}. Drop it in an empty folder and double-click.
 First run downloads ~24MB. If Windows warns "protected your PC", click more info then run anyway.`;
 }
 

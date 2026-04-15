@@ -52,6 +52,7 @@ import {
   searchSteamApps,
   type SteamSearchResult,
 } from "./steam-search";
+import { fetchAppSizes, formatBytes } from "./steamcmd-net";
 
 const { DISCORD_TOKEN, CLI_VERSION, CLI_REPO } = process.env;
 if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
@@ -110,10 +111,19 @@ async function sendBat(
 ) {
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
+  const size = await totalSizeLabel(apps);
   await i.reply({
-    content: reply(lang, apps),
+    content: reply(lang, apps, size),
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
+}
+
+// Sum install-size over every chosen appid, formatted ("3.3 GB"). Returns
+// undefined if no sizes are known — the reply silently drops the suffix.
+async function totalSizeLabel(apps: BatApp[]): Promise<string | undefined> {
+  const sizes = await Promise.all(apps.map((a) => fetchAppSizes(a.appid)));
+  const total = sizes.reduce((n, s) => n + (s?.installBytes ?? 0), 0);
+  return total > 0 ? formatBytes(total) : undefined;
 }
 
 // Builds a human-friendly .bat filename from the root app's name. Multi-app
@@ -163,6 +173,7 @@ async function sendSearch(
     const extras: string[] = [`App ${r.id}`, r.priceText, r.platforms].filter(
       Boolean
     );
+    if (r.installBytes) extras.push(formatBytes(r.installBytes));
     if (r.children.length > 0) {
       extras.push(
         lang === "vi"
@@ -182,12 +193,16 @@ async function sendSearch(
     .setCustomId(`${PICK_PREFIX}${i.user.id}`)
     .setPlaceholder(searchPickPrompt(lang))
     .addOptions(
-      results.map((r, idx) => ({
-        label: `${idx + 1}. ${r.name}`.slice(0, 100),
-        description:
-          `App ${r.id}${r.priceText ? `  •  ${r.priceText}` : ""}`.slice(0, 100),
-        value: String(r.id),
-      }))
+      results.map((r, idx) => {
+        const descParts = [`App ${r.id}`];
+        if (r.priceText) descParts.push(r.priceText);
+        if (r.installBytes) descParts.push(formatBytes(r.installBytes));
+        return {
+          label: `${idx + 1}. ${r.name}`.slice(0, 100),
+          description: descParts.join("  •  ").slice(0, 100),
+          value: String(r.id),
+        };
+      })
     );
 
   await i.editReply({
@@ -229,7 +244,10 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
   // Re-resolve the picked app to decide if we need the child selector.
   // Details are cached from the initial search so this is almost always a
   // cache hit; we still defer the update in case we need the network.
-  const det = await fetchAppDetails(appid);
+  const [det, rootSizes] = await Promise.all([
+    fetchAppDetails(appid),
+    fetchAppSizes(appid),
+  ]);
   const rootName = det?.name ?? `App ${appid}`;
   const childIds = det?.dlc ?? [];
   if (childIds.length === 0) {
@@ -237,31 +255,47 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
     return;
   }
 
-  // Look each child up so we can render type labels. fetchAppDetails is
-  // cached; these are the same calls the search made.
+  // Look each child up so we can render type labels + sizes. All helpers
+  // are cached; repeat calls after the search are free.
   const children = (
     await Promise.all(
       childIds.slice(0, 24).map(async (id) => {
-        const cd = await fetchAppDetails(id);
-        return cd ? { id, name: cd.name, type: cd.type } : null;
+        const [cd, sz] = await Promise.all([
+          fetchAppDetails(id),
+          fetchAppSizes(id),
+        ]);
+        return cd
+          ? { id, name: cd.name, type: cd.type, installBytes: sz?.installBytes }
+          : null;
       })
     )
-  ).filter((c): c is { id: number; name: string; type: string } => !!c);
+  ).filter(
+    (
+      c
+    ): c is {
+      id: number;
+      name: string;
+      type: string;
+      installBytes: number | undefined;
+    } => !!c
+  );
 
   if (children.length === 0) {
     await updateWithBat(i, [{ appid, name: rootName }], lang);
     return;
   }
 
+  const sizeSuffix = (b: number | undefined) => (b ? ` (${formatBytes(b)})` : "");
   const options = [
     {
       label: `${labelBaseGame(lang)} — ${rootName}`.slice(0, 100),
-      description: `App ${appid}`.slice(0, 100),
+      description:
+        `App ${appid}${sizeSuffix(rootSizes?.installBytes)}`.slice(0, 100),
       value: String(appid),
     },
     ...children.map((c) => ({
       label: `${labelType(lang, c.type)} — ${c.name}`.slice(0, 100),
-      description: `App ${c.id}`.slice(0, 100),
+      description: `App ${c.id}${sizeSuffix(c.installBytes)}`.slice(0, 100),
       value: String(c.id),
     })),
   ];
@@ -308,8 +342,9 @@ async function updateWithBat(
 ) {
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
+  const size = await totalSizeLabel(apps);
   await i.update({
-    content: reply(lang, apps),
+    content: reply(lang, apps, size),
     embeds: [],
     components: [],
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],

@@ -1,8 +1,12 @@
 /**
- * Renders a per-appid .bat that:
+ * Renders a .bat that:
  *   1. Queries GitHub Releases API for the latest lua-dl.exe tag
  *   2. Caches it in %LOCALAPPDATA%\lua-dl\lua-dl-<version>.exe
- *   3. Runs it with the baked-in appid
+ *   3. Runs `lua-dl.exe download <appid>` once per appid, sequentially
+ *
+ * Multiple appids are used when the user picks a base game plus its
+ * soundtrack / DLC children from the bot's picker. Each appid has its
+ * own lua and its own depots, so the CLI is invoked once per pick.
  *
  * The output dir for the game is %CD% — the folder the friend double-clicks
  * the bat from. The CLI picks a sanitized game name subfolder itself.
@@ -17,15 +21,14 @@
 const TEMPLATE = String.raw`@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-title lua-dl — app {{APPID}}
+title lua-dl — {{TITLE}}
 
-set APPID={{APPID}}
 set REPO={{REPO}}
 set FALLBACK_VERSION={{VERSION}}
 set EXE_DIR=%LOCALAPPDATA%\lua-dl
 
 echo === lua-dl ===
-echo App ID: %APPID%
+echo {{HEADER}}
 echo.
 
 REM Resolve latest version from GitHub API; fall back to baked version on failure.
@@ -59,31 +62,54 @@ if not exist "%EXE%" (
   )
 )
 
+set WORST_RC=0
+{{DOWNLOADS}}
 echo.
-echo [lua-dl] Starting download to %CD%\ ...
-echo.
-"%EXE%" download %APPID%
-set RC=%errorlevel%
-
-echo.
-if %RC% neq 0 (
-  echo [lua-dl] Download failed with code %RC%. See error above.
+if %WORST_RC% neq 0 (
+  echo [lua-dl] One or more downloads failed. See errors above.
 ) else (
-  echo [lua-dl] Done.
+  echo [lua-dl] All done.
 )
 pause
-exit /b %RC%
+exit /b %WORST_RC%
 `;
 
 export interface BatParams {
-  appid: number;
+  appids: number[];
   version: string;
   repo: string;
 }
 
-export function renderBat({ appid, version, repo }: BatParams): string {
-  return TEMPLATE
-    .replace(/\{\{APPID\}\}/g, String(appid))
+export function renderBat({ appids, version, repo }: BatParams): string {
+  if (appids.length === 0) throw new Error("renderBat: appids is empty");
+
+  const title =
+    appids.length === 1
+      ? `app ${appids[0]}`
+      : `${appids.length} apps`;
+  const header =
+    appids.length === 1
+      ? `App ID: ${appids[0]}`
+      : `App IDs: ${appids.join(", ")}`;
+
+  const total = appids.length;
+  const downloads = appids
+    .map((id, idx) => {
+      const step = total > 1 ? `${idx + 1}/${total}: ` : "";
+      return [
+        ``,
+        `echo.`,
+        `echo [lua-dl] Starting download ${step}app ${id} to %CD%\\ ...`,
+        `echo.`,
+        `"%EXE%" download ${id}`,
+        `if errorlevel 1 set WORST_RC=%errorlevel%`,
+      ].join("\n");
+    })
+    .join("\n");
+
+  return TEMPLATE.replace(/\{\{TITLE\}\}/g, title)
+    .replace(/\{\{HEADER\}\}/g, header)
+    .replace(/\{\{DOWNLOADS\}\}/g, downloads)
     .replace(/\{\{VERSION\}\}/g, version)
     .replace(/\{\{REPO\}\}/g, repo)
     .replace(/\{\{BT\}\}/g, "`");

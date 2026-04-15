@@ -6,6 +6,15 @@
  *   - query:<string>     → searches Steam store, shows embed results with
  *                          header images + a select menu; on pick, emits .bat
  *
+ * Picker flow:
+ *   1. Root pick: one row per game. Soundtracks/DLC hits are pivoted back
+ *      to their parent game (see steam-search.ts) so "yapyap" shows the
+ *      game once, not game + OST as siblings.
+ *   2. If the picked game has children (soundtrack / DLC / demo), a second
+ *      multi-select appears with the base game pre-offered plus each child.
+ *      On submit, a single .bat is emitted that runs lua-dl once per pick.
+ *   3. If the game has no children, the .bat is emitted immediately.
+ *
  * The bot itself never touches Steam depots — all the heavy lifting is done
  * by lua-dl.exe when the friend runs the bat.
  *
@@ -26,6 +35,10 @@ import {
 } from "discord.js";
 import { renderBat } from "./bat-template";
 import {
+  childHeader,
+  childPickPrompt,
+  labelBaseGame,
+  labelType,
   missingInputError,
   pickLang,
   reply,
@@ -34,7 +47,11 @@ import {
   searchPickPrompt,
   type Lang,
 } from "./i18n";
-import { searchSteamApps, type SteamSearchResult } from "./steam-search";
+import {
+  fetchAppDetails,
+  searchSteamApps,
+  type SteamSearchResult,
+} from "./steam-search";
 
 const { DISCORD_TOKEN, CLI_VERSION, CLI_REPO } = process.env;
 if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
@@ -43,6 +60,7 @@ if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
 }
 
 const PICK_PREFIX = "dl-pick:";
+const CHILD_PREFIX = "dl-child:";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -55,8 +73,12 @@ client.on(Events.InteractionCreate, async (i) => {
     await handleDl(i);
     return;
   }
+  if (i.isStringSelectMenu() && i.customId.startsWith(CHILD_PREFIX)) {
+    await handleChildPick(i);
+    return;
+  }
   if (i.isStringSelectMenu() && i.customId.startsWith(PICK_PREFIX)) {
-    await handlePick(i);
+    await handleRootPick(i);
     return;
   }
 });
@@ -67,7 +89,7 @@ async function handleDl(i: ChatInputCommandInteraction) {
   const query = i.options.getString("query");
 
   if (appid) {
-    await sendBat(i, appid, lang);
+    await sendBat(i, [appid], lang);
     return;
   }
   if (query) {
@@ -82,18 +104,41 @@ async function handleDl(i: ChatInputCommandInteraction) {
 
 async function sendBat(
   i: ChatInputCommandInteraction,
-  appid: number,
+  appids: number[],
   lang: Lang
 ) {
-  const bat = renderBat({ appid, version: CLI_VERSION!, repo: CLI_REPO! });
+  const bat = renderBat({ appids, version: CLI_VERSION!, repo: CLI_REPO! });
+  const name = await batFilename(appids);
   await i.reply({
-    content: reply(lang, appid),
-    files: [
-      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
-        name: `lua-dl-${appid}.bat`,
-      }),
-    ],
+    content: reply(lang, appids),
+    files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
+}
+
+// Builds a human-friendly .bat filename from the root app's name. Falls back
+// to `lua-dl-<appid>.bat` if the name lookup fails. Multi-app bundles get a
+// `-bundle` suffix so the user can tell at a glance it downloads more than
+// the base game.
+async function batFilename(appids: number[]): Promise<string> {
+  const root = appids[0];
+  const det = await fetchAppDetails(root);
+  const slug = det ? sanitizeName(det.name) : "";
+  const base = slug || `app-${root}`;
+  const suffix = appids.length > 1 ? "-bundle" : "";
+  return `lua-dl-${base}${suffix}.bat`;
+}
+
+// Windows-safe filename slug. Strips reserved chars (<>:"/\|?*), collapses
+// whitespace to single dashes, drops control chars, trims trailing dots and
+// spaces (Windows rejects those), and caps length so the final filename stays
+// well under the 255-char limit.
+function sanitizeName(name: string): string {
+  const cleaned = name
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/^[-.]+|[-. ]+$/g, "");
+  return cleaned.slice(0, 60);
 }
 
 async function sendSearch(
@@ -116,14 +161,20 @@ async function sendSearch(
   }
 
   const embeds = results.map((r, idx) => {
+    const extras: string[] = [`App ${r.id}`, r.priceText, r.platforms].filter(
+      Boolean
+    );
+    if (r.children.length > 0) {
+      extras.push(
+        lang === "vi"
+          ? `+${r.children.length} nội dung thêm`
+          : `+${r.children.length} extras`
+      );
+    }
     const e = new EmbedBuilder()
       .setTitle(`${idx + 1}. ${r.name}`)
       .setURL(`https://store.steampowered.com/app/${r.id}/`)
-      .setFooter({
-        text: [`App ${r.id}`, r.priceText, r.platforms]
-          .filter(Boolean)
-          .join("  •  "),
-      });
+      .setFooter({ text: extras.join("  •  ") });
     if (r.headerImage) e.setImage(r.headerImage);
     return e;
   });
@@ -134,10 +185,8 @@ async function sendSearch(
     .addOptions(
       results.map((r, idx) => ({
         label: `${idx + 1}. ${r.name}`.slice(0, 100),
-        description: `App ${r.id}${r.priceText ? `  •  ${r.priceText}` : ""}`.slice(
-          0,
-          100
-        ),
+        description:
+          `App ${r.id}${r.priceText ? `  •  ${r.priceText}` : ""}`.slice(0, 100),
         value: String(r.id),
       }))
     );
@@ -151,32 +200,114 @@ async function sendSearch(
   });
 }
 
-async function handlePick(i: StringSelectMenuInteraction) {
-  const lang = pickLang(i.locale);
-  const expectedUser = i.customId.slice(PICK_PREFIX.length);
+function guardOwner(
+  i: StringSelectMenuInteraction,
+  prefix: string,
+  lang: Lang
+): string | null {
+  const rest = i.customId.slice(prefix.length);
+  const expectedUser = rest.split(":")[0];
   if (expectedUser && i.user.id !== expectedUser) {
-    await i.reply({
+    void i.reply({
       content:
         lang === "vi"
           ? "Chỉ người gọi lệnh mới chọn được."
           : "Only the user who ran the command can pick.",
       flags: MessageFlags.Ephemeral,
     });
-    return;
+    return null;
   }
+  return rest;
+}
+
+async function handleRootPick(i: StringSelectMenuInteraction) {
+  const lang = pickLang(i.locale);
+  if (guardOwner(i, PICK_PREFIX, lang) == null) return;
+
   const appid = Number(i.values[0]);
   if (!Number.isFinite(appid) || appid <= 0) return;
 
-  const bat = renderBat({ appid, version: CLI_VERSION!, repo: CLI_REPO! });
+  // Re-resolve the picked app to decide if we need the child selector.
+  // Details are cached from the initial search so this is almost always a
+  // cache hit; we still defer the update in case we need the network.
+  const det = await fetchAppDetails(appid);
+  const childIds = det?.dlc ?? [];
+  if (childIds.length === 0) {
+    await updateWithBat(i, [appid], lang);
+    return;
+  }
+
+  // Look each child up so we can render type labels. fetchAppDetails is
+  // cached; these are the same calls the search made.
+  const children = (
+    await Promise.all(
+      childIds.slice(0, 24).map(async (id) => {
+        const cd = await fetchAppDetails(id);
+        return cd ? { id, name: cd.name, type: cd.type } : null;
+      })
+    )
+  ).filter((c): c is { id: number; name: string; type: string } => !!c);
+
+  if (children.length === 0) {
+    await updateWithBat(i, [appid], lang);
+    return;
+  }
+
+  const gameName = det?.name ?? `App ${appid}`;
+  const options = [
+    {
+      label: `${labelBaseGame(lang)} — ${gameName}`.slice(0, 100),
+      description: `App ${appid}`.slice(0, 100),
+      value: String(appid),
+      default: true,
+    },
+    ...children.map((c) => ({
+      label: `${labelType(lang, c.type)} — ${c.name}`.slice(0, 100),
+      description: `App ${c.id}`.slice(0, 100),
+      value: String(c.id),
+    })),
+  ];
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`${CHILD_PREFIX}${i.user.id}:${appid}`)
+    .setPlaceholder(childPickPrompt(lang))
+    .setMinValues(1)
+    .setMaxValues(options.length)
+    .addOptions(options);
+
   await i.update({
-    content: reply(lang, appid),
+    content: childHeader(lang, gameName),
+    embeds: [],
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
+    ],
+  });
+}
+
+async function handleChildPick(i: StringSelectMenuInteraction) {
+  const lang = pickLang(i.locale);
+  if (guardOwner(i, CHILD_PREFIX, lang) == null) return;
+
+  const appids = i.values
+    .map((v) => Number(v))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (appids.length === 0) return;
+
+  await updateWithBat(i, appids, lang);
+}
+
+async function updateWithBat(
+  i: StringSelectMenuInteraction,
+  appids: number[],
+  lang: Lang
+) {
+  const bat = renderBat({ appids, version: CLI_VERSION!, repo: CLI_REPO! });
+  const name = await batFilename(appids);
+  await i.update({
+    content: reply(lang, appids),
     embeds: [],
     components: [],
-    files: [
-      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
-        name: `lua-dl-${appid}.bat`,
-      }),
-    ],
+    files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
 }
 

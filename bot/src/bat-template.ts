@@ -74,34 +74,39 @@ pause
 exit /b %WORST_RC%
 `;
 
+export interface BatApp {
+  appid: number;
+  name: string; // human-readable label for echo output
+}
+
 export interface BatParams {
-  appids: number[];
+  apps: BatApp[];
   version: string;
   repo: string;
 }
 
-export function renderBat({ appids, version, repo }: BatParams): string {
-  if (appids.length === 0) throw new Error("renderBat: appids is empty");
+export function renderBat({ apps, version, repo }: BatParams): string {
+  if (apps.length === 0) throw new Error("renderBat: apps is empty");
 
-  const title =
-    appids.length === 1
-      ? `app ${appids[0]}`
-      : `${appids.length} apps`;
+  const primary = apps[0].name;
+  const title = apps.length === 1 ? primary : `${primary} (+${apps.length - 1})`;
   const header =
-    appids.length === 1
-      ? `App ID: ${appids[0]}`
-      : `App IDs: ${appids.join(", ")}`;
+    apps.length === 1
+      ? primary
+      : `${apps.length} items: ${apps.map((a) => a.name).join(", ")}`;
 
-  const total = appids.length;
-  const downloads = appids
-    .map((id, idx) => {
+  const total = apps.length;
+  const downloads = apps
+    .map((a, idx) => {
       const step = total > 1 ? `${idx + 1}/${total}: ` : "";
+      // Sanitize for echo: strip % (would be expanded by cmd) and carets.
+      const echoName = a.name.replace(/[%^]/g, "");
       return [
         ``,
         `echo.`,
-        `echo [lua-dl] Starting download ${step}app ${id} to %CD%\\ ...`,
+        `echo [lua-dl] Starting download ${step}${echoName} to %CD%\\ ...`,
         `echo.`,
-        `"%EXE%" download ${id}`,
+        `"%EXE%" download ${a.appid}`,
         `if errorlevel 1 set WORST_RC=%errorlevel%`,
       ].join("\n");
     })

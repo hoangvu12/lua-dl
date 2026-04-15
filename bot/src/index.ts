@@ -33,7 +33,7 @@ import {
   StringSelectMenuInteraction,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import { renderBat } from "./bat-template";
+import { renderBat, type BatApp } from "./bat-template";
 import {
   childHeader,
   childPickPrompt,
@@ -89,7 +89,8 @@ async function handleDl(i: ChatInputCommandInteraction) {
   const query = i.options.getString("query");
 
   if (appid) {
-    await sendBat(i, [appid], lang);
+    const det = await fetchAppDetails(appid);
+    await sendBat(i, [{ appid, name: det?.name ?? `App ${appid}` }], lang);
     return;
   }
   if (query) {
@@ -104,27 +105,25 @@ async function handleDl(i: ChatInputCommandInteraction) {
 
 async function sendBat(
   i: ChatInputCommandInteraction,
-  appids: number[],
+  apps: BatApp[],
   lang: Lang
 ) {
-  const bat = renderBat({ appids, version: CLI_VERSION!, repo: CLI_REPO! });
-  const name = await batFilename(appids);
+  const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
+  const name = batFilename(apps);
   await i.reply({
-    content: reply(lang, appids),
+    content: reply(lang, apps),
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
 }
 
-// Builds a human-friendly .bat filename from the root app's name. Falls back
-// to `lua-dl-<appid>.bat` if the name lookup fails. Multi-app bundles get a
-// `-bundle` suffix so the user can tell at a glance it downloads more than
-// the base game.
-async function batFilename(appids: number[]): Promise<string> {
-  const root = appids[0];
-  const det = await fetchAppDetails(root);
-  const slug = det ? sanitizeName(det.name) : "";
-  const base = slug || `app-${root}`;
-  const suffix = appids.length > 1 ? "-bundle" : "";
+// Builds a human-friendly .bat filename from the root app's name. Multi-app
+// bundles get a `-bundle` suffix so the user can tell at a glance it
+// downloads more than the base game.
+function batFilename(apps: BatApp[]): string {
+  const root = apps[0];
+  const slug = sanitizeName(root.name);
+  const base = slug || `app-${root.appid}`;
+  const suffix = apps.length > 1 ? "-bundle" : "";
   return `lua-dl-${base}${suffix}.bat`;
 }
 
@@ -231,9 +230,10 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
   // Details are cached from the initial search so this is almost always a
   // cache hit; we still defer the update in case we need the network.
   const det = await fetchAppDetails(appid);
+  const rootName = det?.name ?? `App ${appid}`;
   const childIds = det?.dlc ?? [];
   if (childIds.length === 0) {
-    await updateWithBat(i, [appid], lang);
+    await updateWithBat(i, [{ appid, name: rootName }], lang);
     return;
   }
 
@@ -249,14 +249,13 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
   ).filter((c): c is { id: number; name: string; type: string } => !!c);
 
   if (children.length === 0) {
-    await updateWithBat(i, [appid], lang);
+    await updateWithBat(i, [{ appid, name: rootName }], lang);
     return;
   }
 
-  const gameName = det?.name ?? `App ${appid}`;
   const options = [
     {
-      label: `${labelBaseGame(lang)} — ${gameName}`.slice(0, 100),
+      label: `${labelBaseGame(lang)} — ${rootName}`.slice(0, 100),
       description: `App ${appid}`.slice(0, 100),
       value: String(appid),
     },
@@ -275,7 +274,7 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
     .addOptions(options);
 
   await i.update({
-    content: childHeader(lang, gameName),
+    content: childHeader(lang, rootName),
     embeds: [],
     components: [
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
@@ -292,18 +291,25 @@ async function handleChildPick(i: StringSelectMenuInteraction) {
     .filter((n) => Number.isFinite(n) && n > 0);
   if (appids.length === 0) return;
 
-  await updateWithBat(i, appids, lang);
+  const apps = await Promise.all(
+    appids.map(async (appid): Promise<BatApp> => {
+      const det = await fetchAppDetails(appid);
+      return { appid, name: det?.name ?? `App ${appid}` };
+    })
+  );
+
+  await updateWithBat(i, apps, lang);
 }
 
 async function updateWithBat(
   i: StringSelectMenuInteraction,
-  appids: number[],
+  apps: BatApp[],
   lang: Lang
 ) {
-  const bat = renderBat({ appids, version: CLI_VERSION!, repo: CLI_REPO! });
-  const name = await batFilename(appids);
+  const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
+  const name = batFilename(apps);
   await i.update({
-    content: reply(lang, appids),
+    content: reply(lang, apps),
     embeds: [],
     components: [],
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],

@@ -259,7 +259,6 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
       label: `${labelBaseGame(lang)} — ${gameName}`.slice(0, 100),
       description: `App ${appid}`.slice(0, 100),
       value: String(appid),
-      default: true,
     },
     ...children.map((c) => ({
       label: `${labelType(lang, c.type)} — ${c.name}`.slice(0, 100),

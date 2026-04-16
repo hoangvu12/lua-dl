@@ -2,11 +2,22 @@
  * One-shot: registers the /dl slash command globally. Run once per schema
  * change with `bun run register`.
  *
+ * The command is registered with both Guild and User install integration
+ * types so it works as a "personal bot" — usable in any server (even ones
+ * the bot isn't in), DMs, and group DMs — once a user installs it via the
+ * Discord-provided install link.
+ *
  * Global commands take up to 1 hour to propagate. For faster iteration during
  * testing, swap `Routes.applicationCommands(appId)` for
  * `Routes.applicationGuildCommands(appId, guildId)` and set GUILD_ID.
  */
-import { REST, Routes, SlashCommandBuilder } from "discord.js";
+import {
+  ApplicationIntegrationType,
+  InteractionContextType,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} from "discord.js";
 
 const token = process.env.DISCORD_TOKEN;
 const appId = process.env.DISCORD_APP_ID;
@@ -19,6 +30,15 @@ const commands = [
   new SlashCommandBuilder()
     .setName("dl")
     .setDescription("Get a .bat file to download a Steam game")
+    .setIntegrationTypes(
+      ApplicationIntegrationType.GuildInstall,
+      ApplicationIntegrationType.UserInstall,
+    )
+    .setContexts(
+      InteractionContextType.Guild,
+      InteractionContextType.BotDM,
+      InteractionContextType.PrivateChannel,
+    )
     .addIntegerOption((opt) =>
       opt
         .setName("appid")

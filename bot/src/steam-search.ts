@@ -21,6 +21,7 @@
  * snappy.
  */
 
+import { searchOnlineFix } from "./onlinefix";
 import { fetchAppSizes } from "./steamcmd-net";
 
 export type AppType = "game" | "dlc" | "music" | "demo" | string;
@@ -41,6 +42,7 @@ export interface SteamSearchResult {
   type: AppType;
   children: AppChild[];
   installBytes?: number;
+  onlineFixMatches: number;
 }
 
 interface StoreSearchRaw {
@@ -134,7 +136,10 @@ export async function searchSteamApps(
       ]);
       if (!det) return;
       const meta = candidateMeta.get(id)!;
-      const children = await fetchChildren(det.dlc);
+      const [children, fixes] = await Promise.all([
+        fetchChildren(det.dlc),
+        searchOnlineFix(det.name),
+      ]);
       results.push({
         id,
         name: det.name,
@@ -144,6 +149,7 @@ export async function searchSteamApps(
         type: det.type,
         children,
         installBytes: sizes?.installBytes,
+        onlineFixMatches: fixes.length,
       });
     })
   );

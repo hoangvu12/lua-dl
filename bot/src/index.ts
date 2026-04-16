@@ -174,6 +174,13 @@ async function sendSearch(
       Boolean
     );
     if (r.installBytes) extras.push(formatBytes(r.installBytes));
+    if (r.onlineFixMatches > 0) {
+      extras.push(
+        r.onlineFixMatches === 1
+          ? "Online-Fix"
+          : `Online-Fix (${r.onlineFixMatches}${r.onlineFixMatches >= 10 ? "+" : ""})`
+      );
+    }
     if (r.children.length > 0) {
       extras.push(
         lang === "vi"
@@ -197,6 +204,13 @@ async function sendSearch(
         const descParts = [`App ${r.id}`];
         if (r.priceText) descParts.push(r.priceText);
         if (r.installBytes) descParts.push(formatBytes(r.installBytes));
+        if (r.onlineFixMatches > 0) {
+          descParts.push(
+            r.onlineFixMatches === 1
+              ? "Online-Fix"
+              : `Online-Fix (${r.onlineFixMatches}${r.onlineFixMatches >= 10 ? "+" : ""})`
+          );
+        }
         return {
           label: `${idx + 1}. ${r.name}`.slice(0, 100),
           description: descParts.join("  •  ").slice(0, 100),

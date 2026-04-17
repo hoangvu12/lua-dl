@@ -35,6 +35,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/hoangvu12/lua-dl/internal/cdn"
+	"github.com/hoangvu12/lua-dl/internal/goldberg"
 	"github.com/hoangvu12/lua-dl/internal/lua"
 	"github.com/hoangvu12/lua-dl/internal/onlinefix"
 	"github.com/hoangvu12/lua-dl/internal/picker"
@@ -266,10 +267,14 @@ func cmdDownload(ctx context.Context, client *steam.Client, parsed *lua.ParseRes
 	if err := runDownloads(ctx, client, targets, outDir, parsed.AppID, stateCache); err != nil {
 		return err
 	}
-	// Best-effort: offer to install a community Online-Fix if one exists for
-	// this title. Never blocks the successful depot download — any failure
-	// inside Offer is printed and swallowed.
-	_ = onlinefix.Offer(ctx, info.Name, outDir)
+	// Best-effort post-download offers. Errors are printed and swallowed —
+	// neither must taint the successful depot download.
+	// Online-Fix bundles its own Goldberg patch, so skip the standalone
+	// emulator install when the fix was applied.
+	onlinefixInstalled, _ := onlinefix.Offer(ctx, info.Name, outDir)
+	if !onlinefixInstalled {
+		_ = goldberg.Offer(ctx, parsed.AppID, outDir)
+	}
 
 	ui.Done(fmt.Sprintf("Done in %s · %s",
 		ui.FormatDuration(time.Since(overallStart)), outDir))

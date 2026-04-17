@@ -56,13 +56,17 @@ type result struct {
 // one, then download+extract+apply. Every error is soft — we only print
 // them, never bubble them — because a broken fix lookup must not taint the
 // main depot download.
-func Offer(ctx context.Context, gameName, gameDir string) error {
+//
+// Returns true if the fix was successfully applied (Goldberg is already
+// included in online-fix patches, so the caller should skip a standalone
+// Goldberg install when this returns true).
+func Offer(ctx context.Context, gameName, gameDir string) (bool, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil
+		return false, nil
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	client := &http.Client{Jar: jar}
 
@@ -70,27 +74,28 @@ func Offer(ctx context.Context, gameName, gameDir string) error {
 	if err != nil {
 		ui.Phase("Online-Fix")
 		ui.LastStep(fmt.Sprintf("search failed: %v", err))
-		return nil
+		return false, nil
 	}
 	if len(results) == 0 {
-		return nil
+		return false, nil
 	}
 
 	ui.Phase("Online-Fix · multiplayer fix available")
 	if !askYesNo("  Install now? [Y/n]: ") {
 		ui.Note("skipped")
-		return nil
+		return false, nil
 	}
 
 	chosen, ok := pick(gameName, results)
 	if !ok {
 		ui.Note("cancelled")
-		return nil
+		return false, nil
 	}
 	if err := apply(ctx, client, chosen.PageURL, gameDir); err != nil {
 		ui.LastStep(fmt.Sprintf("failed: %v", err))
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 func pick(gameName string, results []result) (result, bool) {

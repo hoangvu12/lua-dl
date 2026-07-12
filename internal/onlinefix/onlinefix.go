@@ -88,15 +88,28 @@ func Offer(ctx context.Context, gameName, gameDir string) (bool, error) {
 	}
 
 	ui.Phase("Online-Fix · multiplayer fix available")
-	if !askYesNo("  Install now? [Y/n]: ") {
+	preview, unambiguous := unambiguousMatch(gameName, results)
+	var prompt string
+	if unambiguous {
+		prompt = fmt.Sprintf("  Install fix for %q? [Y/n]: ", preview.Title)
+	} else {
+		prompt = fmt.Sprintf("  Found %d candidates for %q. Pick one? [Y/n]: ", len(results), gameName)
+	}
+	if !askYesNo(prompt) {
 		ui.Note("skipped")
 		return false, nil
 	}
 
-	chosen, ok := pick(gameName, results)
-	if !ok {
-		ui.Note("cancelled")
-		return false, nil
+	var chosen result
+	if unambiguous {
+		chosen = preview
+	} else {
+		c, ok := pick(gameName, results)
+		if !ok {
+			ui.Note("cancelled")
+			return false, nil
+		}
+		chosen = c
 	}
 	if err := apply(ctx, client, chosen.PageURL, gameDir); err != nil {
 		ui.LastStep(fmt.Sprintf("failed: %v", err))
@@ -105,13 +118,22 @@ func Offer(ctx context.Context, gameName, gameDir string) (bool, error) {
 	return true, nil
 }
 
-func pick(gameName string, results []result) (result, bool) {
+// unambiguousMatch returns the single result we're confident we'd install
+// without prompting the user to pick — either because there's only one hit
+// or because one hit's normalized title matches the requested game exactly.
+// Callers use the returned title in the install confirmation so the user
+// sees what they're about to apply.
+func unambiguousMatch(gameName string, results []result) (result, bool) {
 	if len(results) == 1 {
 		return results[0], true
 	}
 	if exact, ok := exactMatch(gameName, results); ok {
 		return exact, true
 	}
+	return result{}, false
+}
+
+func pick(gameName string, results []result) (result, bool) {
 	items := make([]picker.Item, len(results))
 	for i, r := range results {
 		items[i] = picker.Item{Label: r.Title, Selected: i == 0}

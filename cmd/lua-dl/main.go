@@ -37,6 +37,7 @@ import (
 	"github.com/hoangvu12/lua-dl/internal/cdn"
 	"github.com/hoangvu12/lua-dl/internal/goldberg"
 	"github.com/hoangvu12/lua-dl/internal/lua"
+	"github.com/hoangvu12/lua-dl/internal/manifestcode"
 	"github.com/hoangvu12/lua-dl/internal/onlinefix"
 	"github.com/hoangvu12/lua-dl/internal/picker"
 	"github.com/hoangvu12/lua-dl/internal/resolver"
@@ -65,14 +66,15 @@ const (
 // target is a downloadable depot paired with everything we need to display
 // and classify it. Filled by buildCandidates; consumed by selectTargets.
 type target struct {
-	depotID    uint32
-	manifestID uint64
-	key        []byte
-	name       string
-	size       uint64
-	kind       depotKind
-	language   string
-	oslist     []string
+	depotID       uint32
+	manifestID    uint64 // gid we download — PICS-current preferred
+	luaManifestID uint64 // gid pinned by the lua file, kept as a mirror fallback
+	key           []byte
+	name          string
+	size          uint64
+	kind          depotKind
+	language      string
+	oslist        []string
 }
 
 func main() {
@@ -320,19 +322,20 @@ func buildCandidates(parsed *lua.ParseResult, info *steam.AppInfo) ([]target, er
 			return nil, fmt.Errorf("depot %d: bad lua key: %w", le.ID, err)
 		}
 		pd, inPICS := picsByID[le.ID]
-		mid := resolveManifestID(pd, inPICS, le.ManifestID)
-		if mid == 0 {
+		dlID, luaID := chooseManifestIDs(pd, inPICS, le.ManifestID)
+		if dlID == 0 {
 			continue
 		}
 		out = append(out, target{
-			depotID:    le.ID,
-			manifestID: mid,
-			key:        kb,
-			name:       pd.Name,
-			size:       pd.MaxSize,
-			language:   pd.Language,
-			oslist:     pd.OSList,
-			kind:       classify(pd, inPICS, targetOS),
+			depotID:       le.ID,
+			manifestID:    dlID,
+			luaManifestID: luaID,
+			key:           kb,
+			name:          pd.Name,
+			size:          pd.MaxSize,
+			language:      pd.Language,
+			oslist:        pd.OSList,
+			kind:          classify(pd, inPICS, targetOS),
 		})
 	}
 	return out, nil
@@ -398,23 +401,30 @@ func prepareCandidates(candidates []target, depotFilter map[uint32]bool) []targe
 	return kept
 }
 
-// resolveManifestID picks which manifest ID to download for a depot.
+// chooseManifestIDs decides which manifest to download for a depot, returning
+// the primary download gid plus the lua-pinned gid (kept as a fallback).
 //
-// The lua file's manifest ID is paired with a known-good .manifest binary in
-// ryuu.lol's bundle (they're served together). PICS may report a newer
-// manifest that nobody has archived yet, which would leave us unable to
-// download. So prefer the lua ID when set; only fall back to PICS for
-// lua-less depots (shared system depots, etc).
-func resolveManifestID(pd steam.Depot, inPICS bool, luaManifest string) uint64 {
+// We now fetch manifests via a request code straight from Steam's CDN (see
+// resolveManifestBytes), so any live gid works — we're no longer limited to
+// whatever version a third party happened to archive. That lets us prefer the
+// PICS-current gid: the freshest build, always servable by the CDN. Depot
+// decryption keys are per-depot and stable across versions, so the lua key
+// still decrypts a newer manifest's chunks.
+//
+// The lua-pinned gid is returned too. It's what the GitHub/ryuu mirrors are
+// most likely to have archived, so the mirror fallback tries it as well.
+func chooseManifestIDs(pd steam.Depot, inPICS bool, luaManifest string) (download, lua uint64) {
 	if luaManifest != "" {
-		if n, err := strconv.ParseUint(luaManifest, 10, 64); err == nil && n != 0 {
-			return n
+		if n, err := strconv.ParseUint(luaManifest, 10, 64); err == nil {
+			lua = n
 		}
 	}
 	if inPICS && pd.ManifestID != 0 {
-		return pd.ManifestID
+		download = pd.ManifestID
+	} else {
+		download = lua
 	}
-	return 0
+	return download, lua
 }
 
 // enrichNames fills in missing names by looking up each depot id as an app id.
@@ -553,15 +563,15 @@ func runDownloads(ctx context.Context, client *steam.Client, targets []target, o
 	for _, t := range targets {
 		verbose.Vlog("\n[depot %d] manifest=%d", t.depotID, t.manifestID)
 
-		mCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		rm, err := resolver.ResolveManifest(mCtx, appID, t.depotID, t.manifestID)
+		mCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		buf, usedGID, err := resolveManifestBytes(mCtx, dl, t, appID)
 		cancel()
 		if err != nil {
 			_ = stateCache.Flush()
 			return err
 		}
 
-		manifest, err := steamcdn.NewDepotManifest(rm.Buffer, t.key)
+		manifest, err := steamcdn.NewDepotManifest(buf, t.key)
 		if err != nil {
 			_ = stateCache.Flush()
 			return fmt.Errorf("depot %d parse: %w", t.depotID, err)
@@ -570,7 +580,7 @@ func runDownloads(ctx context.Context, client *steam.Client, targets []target, o
 		req := cdn.DepotRequest{
 			AppID:      appID,
 			DepotID:    t.depotID,
-			ManifestID: t.manifestID,
+			ManifestID: usedGID,
 			DepotKey:   t.key,
 			Manifest:   manifest,
 			OutputDir:  outDir,
@@ -583,6 +593,48 @@ func runDownloads(ctx context.Context, client *steam.Client, targets []target, o
 
 	_ = start // overall timing is reported by the caller's Done summary
 	return stateCache.Flush()
+}
+
+// resolveManifestBytes obtains the raw depot manifest, preferring the
+// OpenSteamTool-style path: fetch a manifest request code from an upstream API
+// (manifestcode), then pull the manifest fresh from Steam's own CDN. If that
+// fails, fall back to the GitHub/ryuu mirror archive.
+//
+// It tries the PICS-current gid first, then the lua-pinned gid. Returns the
+// gid actually used so the state cache and DepotRequest stay consistent with
+// the manifest we downloaded.
+func resolveManifestBytes(ctx context.Context, dl *cdn.Downloader, t target, appID uint32) ([]byte, uint64, error) {
+	gids := []uint64{t.manifestID}
+	if t.luaManifestID != 0 && t.luaManifestID != t.manifestID {
+		gids = append(gids, t.luaManifestID)
+	}
+
+	var errs []string
+	for _, gid := range gids {
+		// Primary: request code + Steam CDN.
+		if code, provider, err := manifestcode.Fetch(ctx, gid); err == nil {
+			if buf, err := dl.FetchManifest(ctx, appID, t.depotID, gid, code); err == nil {
+				verbose.Vlog("[manifest] ✓ Steam CDN via %s code (gid %d, %d bytes)",
+					provider, gid, len(buf))
+				return buf, gid, nil
+			} else {
+				errs = append(errs, fmt.Sprintf("cdn gid %d: %v", gid, err))
+			}
+		} else {
+			errs = append(errs, fmt.Sprintf("code gid %d: %v", gid, err))
+		}
+
+		// Fallback: mirror archive (ryuu bundle + GitHub ManifestHub forks).
+		if rm, err := resolver.ResolveManifest(ctx, appID, t.depotID, gid); err == nil {
+			verbose.Vlog("[manifest] ✓ mirror %s (gid %d, %d bytes)",
+				rm.Source, gid, len(rm.Buffer))
+			return rm.Buffer, gid, nil
+		} else {
+			errs = append(errs, fmt.Sprintf("mirror gid %d: %v", gid, err))
+		}
+	}
+	return nil, 0, fmt.Errorf("all manifest sources failed for depot %d:\n  - %s",
+		t.depotID, strings.Join(errs, "\n  - "))
 }
 
 // steamOS maps Go's GOOS to Steam's config.oslist tokens. Steam uses "macos"

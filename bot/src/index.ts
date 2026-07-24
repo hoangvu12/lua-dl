@@ -129,12 +129,17 @@ async function handleOf(i: ChatInputCommandInteraction) {
 
   if (id) {
     await i.deferReply();
-    const game = await getOfGameById(id.trim());
-    if (!game) {
+    try {
+      const game = await getOfGameById(id.trim());
+      if (!game) {
+        await i.editReply({ content: searchNoResults(lang, id) });
+        return;
+      }
+      await sendOfBat(i, game, lang);
+    } catch (err) {
+      console.error("[of-id]", err);
       await i.editReply({ content: searchNoResults(lang, id) });
-      return;
     }
-    await sendOfBat(i, game, lang);
     return;
   }
   if (query) {
@@ -210,27 +215,52 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
 
   const id = i.values[0];
   if (!id) return;
-  const game = await getOfGameById(id);
-  if (!game) {
-    await i.update({ content: searchNoResults(lang, id), embeds: [], components: [] });
-    return;
-  }
 
-  const bat = renderOfBat({
-    game: { articleId: game.id, title: game.title },
-    version: CLI_VERSION!,
-    repo: CLI_REPO!,
-  });
-  await i.update({
-    content: ofReply(lang, game.title),
-    embeds: [],
-    components: [],
-    files: [
-      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
-        name: ofBatFilename(game.title),
-      }),
-    ],
-  });
+  // Ack the component interaction first, then edit the message via the
+  // interaction webhook. editReply attaches files reliably, whereas the
+  // UPDATE_MESSAGE interaction callback can drop attachments on some clients.
+  try {
+    await i.deferUpdate();
+    const game = await getOfGameById(id);
+    if (!game) {
+      console.warn(`[of-pick] game id ${id} not found in catalog`);
+      await i.editReply({
+        content: searchNoResults(lang, id),
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+
+    const bat = renderOfBat({
+      game: { articleId: game.id, title: game.title },
+      version: CLI_VERSION!,
+      repo: CLI_REPO!,
+    });
+    await i.editReply({
+      content: ofReply(lang, game.title),
+      embeds: [],
+      components: [],
+      files: [
+        new AttachmentBuilder(Buffer.from(bat, "utf8"), {
+          name: ofBatFilename(game.title),
+        }),
+      ],
+    });
+  } catch (err) {
+    console.error("[of-pick] failed to send bat:", err);
+    try {
+      await i.followUp({
+        content:
+          lang === "vi"
+            ? "Có lỗi khi tạo file .bat, thử lại nhé."
+            : "Something went wrong building the .bat — try again.",
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch {
+      /* interaction already gone */
+    }
+  }
 }
 
 async function sendOfBat(

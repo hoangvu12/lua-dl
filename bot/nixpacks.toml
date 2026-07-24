@@ -4,5 +4,8 @@ nixPkgs = ["nodejs_20", "bun"]
 [phases.install]
 cmds = ["bun install --frozen-lockfile"]
 
+# Run on Node (via tsx), NOT `bun run` — Bun's FormData/multipart is buggy and
+# silently drops discord.js file attachments (the .bat never sends). Node's
+# undici forms multipart correctly. Bun is kept only for fast installs above.
 [start]
-cmd = "bun run src/index.ts"
+cmd = "npx tsx src/index.ts"

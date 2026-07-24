@@ -26,11 +26,17 @@ Two commands:
 ## Running
 
 ```bash
-bun run start
+bun run start   # or: npm start
 ```
 
 Bot connects to Discord and listens. Keep the process alive (screen, tmux,
 pm2, systemd, or a hobby host like an Oracle Cloud free VM).
+
+> **Runtime: Node, not Bun.** `start`/`register` run via `tsx` (Node) on
+> purpose. Running the bot under `bun` directly breaks file attachments — Bun's
+> multipart/FormData implementation silently drops discord.js uploads, so the
+> `.bat` never sends (only the message text does). Bun is still fine for
+> `bun install`. The deploy (`nixpacks.toml`) runs `npx tsx src/index.ts`.
 
 ## Updating the CLI version
 

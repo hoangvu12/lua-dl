@@ -73,9 +73,30 @@ const OF_PICK_PREFIX = "of-pick:";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Bump this on every deploy you want to confirm is live. If the log line below
+// doesn't show this exact marker, the host is running stale code.
+const BUILD_MARKER = "diag-2026-07-25-a";
+
 client.once(Events.ClientReady, (c) => {
-  console.log(`[bot] logged in as ${c.user.tag}`);
+  const runtime =
+    typeof Bun !== "undefined"
+      ? `Bun ${Bun.version}`
+      : `Node ${process.version} (undici ${process.versions.undici})`;
+  console.log(
+    `[bot] logged in as ${c.user.tag} | build=${BUILD_MARKER} | runtime=${runtime}`
+  );
 });
+
+// After sending a file-bearing reply, log what Discord actually stored. If
+// `attachments=0` the request succeeded but Discord dropped the file (a real
+// upload/multipart problem); if `attachments=1` the .bat WAS delivered and the
+// problem is on the viewing side (wrong channel, client cache, ad-blocker on
+// the CDN link). `res` is the Message returned by reply/editReply.
+function logSent(res: unknown, tag: string) {
+  const msg = res as { id?: string; attachments?: { size?: number } } | null;
+  const n = msg?.attachments?.size ?? "?";
+  console.log(`[${tag}] sent message id=${msg?.id ?? "?"} attachments=${n}`);
+}
 
 client.on(Events.InteractionCreate, async (i) => {
   if (i.isChatInputCommand() && i.commandName === "dl") {
@@ -265,7 +286,7 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
       version: CLI_VERSION!,
       repo: CLI_REPO!,
     });
-    await i.editReply({
+    const res = await i.editReply({
       content: ofReply(lang, game.title),
       embeds: [],
       components: [],
@@ -275,6 +296,7 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
         }),
       ],
     });
+    logSent(res, "of-pick");
   } catch (err) {
     console.error("[of-pick] failed to send bat:", err);
     try {
@@ -301,7 +323,7 @@ async function sendOfBat(
     version: CLI_VERSION!,
     repo: CLI_REPO!,
   });
-  await i.editReply({
+  const res = await i.editReply({
     content: ofReply(lang, game.title),
     files: [
       new AttachmentBuilder(Buffer.from(bat, "utf8"), {
@@ -309,6 +331,7 @@ async function sendOfBat(
       }),
     ],
   });
+  logSent(res, "of-id");
 }
 
 function ofBatFilename(title: string): string {
@@ -334,10 +357,11 @@ async function sendBat(
   const size = await totalSizeLabel(apps);
   // The caller defers before this runs, so edit the deferred reply. editReply
   // is the webhook-edit path that attaches files reliably.
-  await i.editReply({
+  const res = await i.editReply({
     content: reply(lang, apps, size),
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
+  logSent(res, "dl-appid");
 }
 
 // Sum install-size over every chosen appid, formatted ("3.3 GB"). Returns
@@ -612,12 +636,13 @@ async function updateWithBat(
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
   // Caller defers first, so edit the deferred reply (reliable file attach path).
-  await i.editReply({
+  const res = await i.editReply({
     content: reply(lang, apps, size),
     embeds: [],
     components: [],
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
+  logSent(res, "dl-pick");
 }
 
 client.login(DISCORD_TOKEN);

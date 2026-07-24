@@ -286,10 +286,16 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
       version: CLI_VERSION!,
       repo: CLI_REPO!,
     });
-    const res = await i.editReply({
+    // Collapse the picker to the confirmation text (drop the menu), then send
+    // the .bat as a NEW message. Discord's client does not reliably re-render
+    // an attachment edited onto an existing message (it only appeared after a
+    // hard refresh); a fresh follow-up always shows its file immediately.
+    await i.editReply({
       content: ofReply(lang, game.title),
       embeds: [],
       components: [],
+    });
+    const res = await i.followUp({
       files: [
         new AttachmentBuilder(Buffer.from(bat, "utf8"), {
           name: ofBatFilename(game.title),
@@ -323,8 +329,10 @@ async function sendOfBat(
     version: CLI_VERSION!,
     repo: CLI_REPO!,
   });
-  const res = await i.editReply({
-    content: ofReply(lang, game.title),
+  // Text on the reply, .bat as a fresh follow-up so the client renders it
+  // immediately (an attachment edited onto the reply can need a hard refresh).
+  await i.editReply({ content: ofReply(lang, game.title) });
+  const res = await i.followUp({
     files: [
       new AttachmentBuilder(Buffer.from(bat, "utf8"), {
         name: ofBatFilename(game.title),
@@ -355,10 +363,12 @@ async function sendBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  // The caller defers before this runs, so edit the deferred reply. editReply
-  // is the webhook-edit path that attaches files reliably.
-  const res = await i.editReply({
-    content: reply(lang, apps, size),
+  // Caller defers first: put the text on the reply, then send the .bat as a
+  // fresh follow-up. Attaching a file by editing the (deferred) reply can leave
+  // the Discord client showing no attachment until a hard refresh; a new
+  // message always renders its file.
+  await i.editReply({ content: reply(lang, apps, size) });
+  const res = await i.followUp({
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
   logSent(res, "dl-appid");
@@ -635,11 +645,16 @@ async function updateWithBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  // Caller defers first, so edit the deferred reply (reliable file attach path).
-  const res = await i.editReply({
+  // Collapse the picker to the confirmation text (drop the menu), then send the
+  // .bat as a NEW message. Discord's client does not reliably re-render an
+  // attachment edited onto an existing message (it only appeared after a hard
+  // refresh); a fresh follow-up always shows its file immediately.
+  await i.editReply({
     content: reply(lang, apps, size),
     embeds: [],
     components: [],
+  });
+  const res = await i.followUp({
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
   logSent(res, "dl-pick");

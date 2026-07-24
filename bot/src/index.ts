@@ -237,10 +237,16 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
       version: CLI_VERSION!,
       repo: CLI_REPO!,
     });
+    // Collapse the picker to the confirmation text (drop the menu), then send
+    // the .bat as a NEW message. Discord clients don't reliably repaint an
+    // attachment that's edited onto an existing message (OpenAsar/Vencord
+    // needs a hard refresh); a fresh follow-up always shows its file.
     await i.editReply({
       content: ofReply(lang, game.title),
       embeds: [],
       components: [],
+    });
+    await i.followUp({
       files: [
         new AttachmentBuilder(Buffer.from(bat, "utf8"), {
           name: ofBatFilename(game.title),
@@ -273,8 +279,10 @@ async function sendOfBat(
     version: CLI_VERSION!,
     repo: CLI_REPO!,
   });
-  await i.editReply({
-    content: ofReply(lang, game.title),
+  // Text on the reply, .bat as a fresh follow-up so clients render it without a
+  // hard refresh (an attachment edited onto the reply can fail to repaint).
+  await i.editReply({ content: ofReply(lang, game.title) });
+  await i.followUp({
     files: [
       new AttachmentBuilder(Buffer.from(bat, "utf8"), {
         name: ofBatFilename(game.title),
@@ -304,8 +312,11 @@ async function sendBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  await i.reply({
-    content: reply(lang, apps, size),
+  // Text on the reply, .bat as a fresh follow-up so clients render it without a
+  // hard refresh (an attachment on an edited/updated message can fail to
+  // repaint on OpenAsar/Vencord).
+  await i.reply({ content: reply(lang, apps, size) });
+  await i.followUp({
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
 }
@@ -549,10 +560,16 @@ async function updateWithBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
+  // Collapse the picker to the confirmation text (drop the menu), then send the
+  // .bat as a NEW message. An attachment edited onto an existing message isn't
+  // reliably repainted by Discord clients (OpenAsar/Vencord needs a hard
+  // refresh); a fresh follow-up always shows its file.
   await i.update({
     content: reply(lang, apps, size),
     embeds: [],
     components: [],
+  });
+  await i.followUp({
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
 }

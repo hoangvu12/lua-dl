@@ -73,30 +73,9 @@ const OF_PICK_PREFIX = "of-pick:";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Bump this on every deploy you want to confirm is live. If the log line below
-// doesn't show this exact marker, the host is running stale code.
-const BUILD_MARKER = "diag-2026-07-25-a";
-
 client.once(Events.ClientReady, (c) => {
-  const runtime =
-    typeof Bun !== "undefined"
-      ? `Bun ${Bun.version}`
-      : `Node ${process.version} (undici ${process.versions.undici})`;
-  console.log(
-    `[bot] logged in as ${c.user.tag} | build=${BUILD_MARKER} | runtime=${runtime}`
-  );
+  console.log(`[bot] logged in as ${c.user.tag}`);
 });
-
-// After sending a file-bearing reply, log what Discord actually stored. If
-// `attachments=0` the request succeeded but Discord dropped the file (a real
-// upload/multipart problem); if `attachments=1` the .bat WAS delivered and the
-// problem is on the viewing side (wrong channel, client cache, ad-blocker on
-// the CDN link). `res` is the Message returned by reply/editReply.
-function logSent(res: unknown, tag: string) {
-  const msg = res as { id?: string; attachments?: { size?: number } } | null;
-  const n = msg?.attachments?.size ?? "?";
-  console.log(`[${tag}] sent message id=${msg?.id ?? "?"} attachments=${n}`);
-}
 
 client.on(Events.InteractionCreate, async (i) => {
   if (i.isChatInputCommand() && i.commandName === "dl") {
@@ -127,19 +106,8 @@ async function handleDl(i: ChatInputCommandInteraction) {
   const query = i.options.getString("query");
 
   if (appid) {
-    // Defer FIRST. Resolving the name + install size hits appdetails and
-    // api.steamcmd.net (up to a 6s timeout) — well past Discord's 3s ack
-    // window. Without an early defer the interaction token expires and the
-    // reply (with the .bat) is rejected as "Unknown interaction" (10062),
-    // which looked like "the attachment failed to send".
-    await i.deferReply();
-    try {
-      const det = await fetchAppDetails(appid);
-      await sendBat(i, [{ appid, name: det?.name ?? `App ${appid}` }], lang);
-    } catch (err) {
-      console.error("[dl-appid]", err);
-      await failBat(i, lang);
-    }
+    const det = await fetchAppDetails(appid);
+    await sendBat(i, [{ appid, name: det?.name ?? `App ${appid}` }], lang);
     return;
   }
   if (query) {
@@ -150,23 +118,6 @@ async function handleDl(i: ChatInputCommandInteraction) {
     content: missingInputError(lang),
     flags: MessageFlags.Ephemeral,
   });
-}
-
-// Surfaces a build/send failure to the user on an already-deferred interaction,
-// swallowing any secondary error if the interaction is already gone.
-async function failBat(
-  i: ChatInputCommandInteraction | StringSelectMenuInteraction,
-  lang: Lang
-) {
-  const content =
-    lang === "vi"
-      ? "Có lỗi khi tạo file .bat, thử lại nhé."
-      : "Something went wrong building the .bat — try again.";
-  try {
-    await i.editReply({ content, embeds: [], components: [] });
-  } catch {
-    /* interaction expired or already resolved */
-  }
 }
 
 // --- Online-Fix full-game flow (/of) ---------------------------------------
@@ -286,23 +237,16 @@ async function handleOfPick(i: StringSelectMenuInteraction) {
       version: CLI_VERSION!,
       repo: CLI_REPO!,
     });
-    // Collapse the picker to the confirmation text (drop the menu), then send
-    // the .bat as a NEW message. Discord's client does not reliably re-render
-    // an attachment edited onto an existing message (it only appeared after a
-    // hard refresh); a fresh follow-up always shows its file immediately.
     await i.editReply({
       content: ofReply(lang, game.title),
       embeds: [],
       components: [],
-    });
-    const res = await i.followUp({
       files: [
         new AttachmentBuilder(Buffer.from(bat, "utf8"), {
           name: ofBatFilename(game.title),
         }),
       ],
     });
-    logSent(res, "of-pick");
   } catch (err) {
     console.error("[of-pick] failed to send bat:", err);
     try {
@@ -329,17 +273,14 @@ async function sendOfBat(
     version: CLI_VERSION!,
     repo: CLI_REPO!,
   });
-  // Text on the reply, .bat as a fresh follow-up so the client renders it
-  // immediately (an attachment edited onto the reply can need a hard refresh).
-  await i.editReply({ content: ofReply(lang, game.title) });
-  const res = await i.followUp({
+  await i.editReply({
+    content: ofReply(lang, game.title),
     files: [
       new AttachmentBuilder(Buffer.from(bat, "utf8"), {
         name: ofBatFilename(game.title),
       }),
     ],
   });
-  logSent(res, "of-id");
 }
 
 function ofBatFilename(title: string): string {
@@ -363,15 +304,10 @@ async function sendBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  // Caller defers first: put the text on the reply, then send the .bat as a
-  // fresh follow-up. Attaching a file by editing the (deferred) reply can leave
-  // the Discord client showing no attachment until a hard refresh; a new
-  // message always renders its file.
-  await i.editReply({ content: reply(lang, apps, size) });
-  const res = await i.followUp({
+  await i.reply({
+    content: reply(lang, apps, size),
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
-  logSent(res, "dl-appid");
 }
 
 // Sum install-size over every chosen appid, formatted ("3.3 GB"). Returns
@@ -511,31 +447,9 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
   const appid = Number(i.values[0]);
   if (!Number.isFinite(appid) || appid <= 0) return;
 
-  // Ack within Discord's 3s window before any network. Re-resolving the app
-  // and its size can hit appdetails + api.steamcmd.net (6s timeout); on a cold
-  // cache that overruns the component-interaction deadline and the follow-up
-  // .bat is rejected as "Unknown interaction".
-  try {
-    await i.deferUpdate();
-  } catch {
-    return; // token already gone; nothing we can do
-  }
-
-  try {
-    await sendRootPick(i, appid, lang);
-  } catch (err) {
-    console.error("[dl-pick]", err);
-    await failBat(i, lang);
-  }
-}
-
-async function sendRootPick(
-  i: StringSelectMenuInteraction,
-  appid: number,
-  lang: Lang
-) {
+  // Re-resolve the picked app to decide if we need the child selector.
   // Details are cached from the initial search so this is almost always a
-  // cache hit; the early deferUpdate covers the cold-cache network case.
+  // cache hit; we still defer the update in case we need the network.
   const [det, rootSizes] = await Promise.all([
     fetchAppDetails(appid),
     fetchAppSizes(appid),
@@ -599,7 +513,7 @@ async function sendRootPick(
     .setMaxValues(options.length)
     .addOptions(options);
 
-  await i.editReply({
+  await i.update({
     content: childHeader(lang, rootName),
     embeds: [],
     components: [
@@ -617,24 +531,14 @@ async function handleChildPick(i: StringSelectMenuInteraction) {
     .filter((n) => Number.isFinite(n) && n > 0);
   if (appids.length === 0) return;
 
-  try {
-    await i.deferUpdate();
-  } catch {
-    return;
-  }
+  const apps = await Promise.all(
+    appids.map(async (appid): Promise<BatApp> => {
+      const det = await fetchAppDetails(appid);
+      return { appid, name: det?.name ?? `App ${appid}` };
+    })
+  );
 
-  try {
-    const apps = await Promise.all(
-      appids.map(async (appid): Promise<BatApp> => {
-        const det = await fetchAppDetails(appid);
-        return { appid, name: det?.name ?? `App ${appid}` };
-      })
-    );
-    await updateWithBat(i, apps, lang);
-  } catch (err) {
-    console.error("[dl-child]", err);
-    await failBat(i, lang);
-  }
+  await updateWithBat(i, apps, lang);
 }
 
 async function updateWithBat(
@@ -645,19 +549,12 @@ async function updateWithBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  // Collapse the picker to the confirmation text (drop the menu), then send the
-  // .bat as a NEW message. Discord's client does not reliably re-render an
-  // attachment edited onto an existing message (it only appeared after a hard
-  // refresh); a fresh follow-up always shows its file immediately.
-  await i.editReply({
+  await i.update({
     content: reply(lang, apps, size),
     embeds: [],
     components: [],
-  });
-  const res = await i.followUp({
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
-  logSent(res, "dl-pick");
 }
 
 client.login(DISCORD_TOKEN);

@@ -56,6 +56,35 @@ const commands = [
         .setMaxLength(100)
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("of")
+    .setDescription("Get a .bat to download a full cracked game from Online-Fix")
+    .setIntegrationTypes(
+      ApplicationIntegrationType.GuildInstall,
+      ApplicationIntegrationType.UserInstall,
+    )
+    .setContexts(
+      InteractionContextType.Guild,
+      InteractionContextType.BotDM,
+      InteractionContextType.PrivateChannel,
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("query")
+        .setDescription("Search Online-Fix by game name — shows a picker")
+        .setRequired(false)
+        .setMinLength(2)
+        .setMaxLength(100)
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("id")
+        .setDescription("Online-Fix article id (skip search, emit .bat directly)")
+        .setRequired(false)
+        .setMinLength(1)
+        .setMaxLength(20)
+    )
+    .toJSON(),
 ];
 
 const rest = new REST({ version: "10" }).setToken(token);

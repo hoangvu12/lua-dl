@@ -83,3 +83,22 @@ export function missingInputError(lang: Lang): string {
   }
   return "Provide either `appid` (number) or `query` (game name).";
 }
+
+// --- Online-Fix full-game flow (/of) ---------------------------------------
+
+export function ofReply(lang: Lang, title: string, sizeLabel?: string): string {
+  const sizeSuffix = sizeLabel ? ` (${sizeLabel})` : "";
+  if (lang === "vi") {
+    return `File .bat cho **${title}**${sizeSuffix} — bản full crack từ Online-Fix. Bỏ vào 1 folder trống rồi double-click.
+Game sẽ tự tải + giải nén vào folder đó (có nhiều phần thì tự ghép). Nếu Windows/Defender báo chặn thì bấm more info → run anyway và bấm Yes khi hỏi thêm exclusion.`;
+  }
+  return `Your .bat for **${title}**${sizeSuffix} — the full cracked build from Online-Fix. Drop it in an empty folder and double-click.
+It downloads and extracts the game into that folder (multi-part archives are joined automatically). If Windows/Defender warns, click more info → run anyway, and click Yes on the exclusion prompt.`;
+}
+
+export function ofMissingInputError(lang: Lang): string {
+  if (lang === "vi") {
+    return "Cần truyền 1 trong 2: `query` (tên game) hoặc `id` (article id trên Online-Fix).";
+  }
+  return "Provide either `query` (game name) or `id` (Online-Fix article id).";
+}

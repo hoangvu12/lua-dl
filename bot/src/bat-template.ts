@@ -2,14 +2,16 @@
  * Renders a .bat that:
  *   1. Queries GitHub Releases API for the latest lua-dl.exe tag
  *   2. Caches it in %LOCALAPPDATA%\lua-dl\lua-dl-<version>.exe
- *   3. Runs `lua-dl.exe download <appid>` once per appid, sequentially
+ *   3. Runs the CLI: `download <appid>` (Steam) or `of <articleId>` (Online-Fix)
  *
- * Multiple appids are used when the user picks a base game plus its
- * soundtrack / DLC children from the bot's picker. Each appid has its
- * own lua and its own depots, so the CLI is invoked once per pick.
+ * For Steam (`renderBat`), multiple appids are used when the user picks a base
+ * game plus its soundtrack / DLC children; the CLI is invoked once per pick.
+ * For Online-Fix (`renderOfBat`), a single `of` call downloads and extracts the
+ * full cracked build.
  *
- * The output dir for the game is %CD% — the folder the friend double-clicks
- * the bat from. The CLI picks a sanitized game name subfolder itself.
+ * The output dir is %CD% — the folder the friend double-clicks the bat from.
+ * The Steam CLI picks a sanitized game-name subfolder itself; the Online-Fix
+ * path is handed an explicit `--out "<folder>"`.
  *
  * Gotchas baked in (don't remove):
  *  - `chcp 65001` so Unicode game names in the CLI's stderr render correctly
@@ -88,9 +90,68 @@ export function renderBat({ apps, version, repo }: BatParams): string {
     })
     .join("\n");
 
+  return fillTemplate(title, downloads, version, repo);
+}
+
+export interface BatOfGame {
+  articleId: string; // online-fix article id — passed to `lua-dl of <id>`
+  title: string; // human-readable label; also the extraction folder name
+}
+
+export interface BatOfParams {
+  game: BatOfGame;
+  version: string;
+  repo: string;
+}
+
+/**
+ * Renders a .bat that downloads a full game from online-fix.me via
+ * `lua-dl of <articleId> --out "<folder>"`. The CLI logs in, resolves the
+ * hosters, downloads every archive part, and extracts the game into <folder>
+ * (a subfolder of wherever the friend double-clicks the bat).
+ */
+export function renderOfBat({ game, version, repo }: BatOfParams): string {
+  const folder = batSafeFolder(game.title);
+  const downloads = [
+    ``,
+    `"%EXE%" of ${game.articleId} --out "${folder}"`,
+    `if errorlevel 1 set WORST_RC=%errorlevel%`,
+  ].join("\n");
+  return fillTemplate(batSafeTitle(game.title), downloads, version, repo);
+}
+
+function fillTemplate(
+  title: string,
+  downloads: string,
+  version: string,
+  repo: string
+): string {
   return TEMPLATE.replace(/\{\{TITLE\}\}/g, title)
     .replace(/\{\{DOWNLOADS\}\}/g, downloads)
     .replace(/\{\{VERSION\}\}/g, version)
     .replace(/\{\{REPO\}\}/g, repo)
     .replace(/\{\{BT\}\}/g, "`");
+}
+
+// batSafeTitle strips cmd metacharacters that would break the `title` line
+// (e.g. `&` chains a command, `%`/`!` expand variables).
+function batSafeTitle(name: string): string {
+  return (
+    name
+      .replace(/[&<>|%!^"()]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "online-fix"
+  );
+}
+
+// batSafeFolder makes a Windows-safe folder name to pass to --out. It keeps
+// ASCII letters, digits, spaces, dashes, underscores and dots, and drops
+// everything else — including chars unsafe inside double quotes with delayed
+// expansion on (%, !) and anything cmd/NTFS reject.
+function batSafeFolder(name: string): string {
+  const cleaned = name
+    .replace(/[^A-Za-z0-9 ._-]+/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[-. ]+|[-. ]+$/g, "");
+  return cleaned.slice(0, 80) || "online-fix-game";
 }

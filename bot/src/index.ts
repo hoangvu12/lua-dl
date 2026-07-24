@@ -33,13 +33,15 @@ import {
   StringSelectMenuInteraction,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import { renderBat, type BatApp } from "./bat-template";
+import { renderBat, renderOfBat, type BatApp } from "./bat-template";
 import {
   childHeader,
   childPickPrompt,
   labelBaseGame,
   labelType,
   missingInputError,
+  ofMissingInputError,
+  ofReply,
   pickLang,
   reply,
   searchHeader,
@@ -53,6 +55,11 @@ import {
   type SteamSearchResult,
 } from "./steam-search";
 import { fetchAppSizes, formatBytes } from "./steamcmd-net";
+import {
+  getOfGameById,
+  searchOfCatalog,
+  type OfCatalogGame,
+} from "./of-catalog";
 
 const { DISCORD_TOKEN, CLI_VERSION, CLI_REPO } = process.env;
 if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
@@ -62,6 +69,7 @@ if (!DISCORD_TOKEN || !CLI_VERSION || !CLI_REPO) {
 
 const PICK_PREFIX = "dl-pick:";
 const CHILD_PREFIX = "dl-child:";
+const OF_PICK_PREFIX = "of-pick:";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -72,6 +80,14 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, async (i) => {
   if (i.isChatInputCommand() && i.commandName === "dl") {
     await handleDl(i);
+    return;
+  }
+  if (i.isChatInputCommand() && i.commandName === "of") {
+    await handleOf(i);
+    return;
+  }
+  if (i.isStringSelectMenu() && i.customId.startsWith(OF_PICK_PREFIX)) {
+    await handleOfPick(i);
     return;
   }
   if (i.isStringSelectMenu() && i.customId.startsWith(CHILD_PREFIX)) {
@@ -102,6 +118,152 @@ async function handleDl(i: ChatInputCommandInteraction) {
     content: missingInputError(lang),
     flags: MessageFlags.Ephemeral,
   });
+}
+
+// --- Online-Fix full-game flow (/of) ---------------------------------------
+
+async function handleOf(i: ChatInputCommandInteraction) {
+  const lang = pickLang(i.locale);
+  const id = i.options.getString("id");
+  const query = i.options.getString("query");
+
+  if (id) {
+    await i.deferReply();
+    const game = await getOfGameById(id.trim());
+    if (!game) {
+      await i.editReply({ content: searchNoResults(lang, id) });
+      return;
+    }
+    await sendOfBat(i, game, lang);
+    return;
+  }
+  if (query) {
+    await sendOfSearch(i, query, lang);
+    return;
+  }
+  await i.reply({
+    content: ofMissingInputError(lang),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function sendOfSearch(
+  i: ChatInputCommandInteraction,
+  query: string,
+  lang: Lang
+) {
+  await i.deferReply();
+  let results: OfCatalogGame[];
+  try {
+    results = await searchOfCatalog(query, 5);
+  } catch (err) {
+    console.error("[of-search]", err);
+    await i.editReply({ content: searchNoResults(lang, query) });
+    return;
+  }
+  if (results.length === 0) {
+    await i.editReply({ content: searchNoResults(lang, query) });
+    return;
+  }
+
+  const embeds = results.map((r, idx) => {
+    const extras: string[] = [];
+    if (r.version) extras.push(`v${r.version.replace(/^v/i, "")}`);
+    if (r.steamAppId) extras.push(`App ${r.steamAppId}`);
+    if (r.updatedAt) extras.push(ofUpdatedLabel(r.updatedAt));
+    const e = new EmbedBuilder()
+      .setTitle(`${idx + 1}. ${r.title}`.slice(0, 256))
+      .setURL(r.originUrl);
+    if (extras.length) e.setFooter({ text: extras.join("  •  ") });
+    if (r.coverUrl) e.setImage(r.coverUrl);
+    return e;
+  });
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`${OF_PICK_PREFIX}${i.user.id}`)
+    .setPlaceholder(searchPickPrompt(lang))
+    .addOptions(
+      results.map((r, idx) => {
+        const descParts: string[] = [];
+        if (r.version) descParts.push(`v${r.version.replace(/^v/i, "")}`);
+        if (r.steamAppId) descParts.push(`App ${r.steamAppId}`);
+        return {
+          label: `${idx + 1}. ${r.title}`.slice(0, 100),
+          description: (descParts.join("  •  ") || "Online-Fix").slice(0, 100),
+          value: r.id,
+        };
+      })
+    );
+
+  await i.editReply({
+    content: searchHeader(lang, query, results.length),
+    embeds,
+    components: [
+      new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
+    ],
+  });
+}
+
+async function handleOfPick(i: StringSelectMenuInteraction) {
+  const lang = pickLang(i.locale);
+  if (guardOwner(i, OF_PICK_PREFIX, lang) == null) return;
+
+  const id = i.values[0];
+  if (!id) return;
+  const game = await getOfGameById(id);
+  if (!game) {
+    await i.update({ content: searchNoResults(lang, id), embeds: [], components: [] });
+    return;
+  }
+
+  const bat = renderOfBat({
+    game: { articleId: game.id, title: game.title },
+    version: CLI_VERSION!,
+    repo: CLI_REPO!,
+  });
+  await i.update({
+    content: ofReply(lang, game.title),
+    embeds: [],
+    components: [],
+    files: [
+      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
+        name: ofBatFilename(game.title),
+      }),
+    ],
+  });
+}
+
+async function sendOfBat(
+  i: ChatInputCommandInteraction,
+  game: OfCatalogGame,
+  lang: Lang
+) {
+  const bat = renderOfBat({
+    game: { articleId: game.id, title: game.title },
+    version: CLI_VERSION!,
+    repo: CLI_REPO!,
+  });
+  await i.editReply({
+    content: ofReply(lang, game.title),
+    files: [
+      new AttachmentBuilder(Buffer.from(bat, "utf8"), {
+        name: ofBatFilename(game.title),
+      }),
+    ],
+  });
+}
+
+function ofBatFilename(title: string): string {
+  const slug = sanitizeName(title) || "game";
+  return `lua-dl-of-${slug}.bat`;
+}
+
+// ofUpdatedLabel renders an ISO/date-ish string as "updated 2026-05-12", or the
+// raw value when it isn't parseable.
+function ofUpdatedLabel(updatedAt: string): string {
+  const d = new Date(updatedAt);
+  if (Number.isNaN(d.getTime())) return `updated ${updatedAt}`.slice(0, 40);
+  return `updated ${d.toISOString().slice(0, 10)}`;
 }
 
 async function sendBat(

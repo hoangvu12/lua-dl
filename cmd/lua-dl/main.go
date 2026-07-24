@@ -39,6 +39,7 @@ import (
 	"github.com/hoangvu12/lua-dl/internal/lua"
 	"github.com/hoangvu12/lua-dl/internal/manifestcode"
 	"github.com/hoangvu12/lua-dl/internal/onlinefix"
+	"github.com/hoangvu12/lua-dl/internal/onlinefixgame"
 	"github.com/hoangvu12/lua-dl/internal/picker"
 	"github.com/hoangvu12/lua-dl/internal/resolver"
 	"github.com/hoangvu12/lua-dl/internal/sanitize"
@@ -98,6 +99,12 @@ func run() error {
 	}
 
 	ctx := context.Background()
+
+	// `of` downloads a full game from online-fix.me and needs neither a lua
+	// source nor a Steam connection, so branch before either is set up.
+	if cmd == "of" {
+		return cmdOF(ctx, arg, rest)
+	}
 
 	source, sourceLabel, err := loadSource(ctx, arg)
 	if err != nil {
@@ -681,6 +688,16 @@ func flagVal(args []string, name string) string {
 	return ""
 }
 
+// cmdOF downloads a full game from online-fix.me and extracts it in place.
+// ref is an online-fix article id (or a full URL); --out overrides the output
+// folder, which otherwise defaults to a folder named after the game under the
+// current directory.
+func cmdOF(ctx context.Context, ref string, rest []string) error {
+	return onlinefixgame.Download(ctx, ref, flagVal(rest, "--out"))
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: lua-dl <parse|probe|download> <file.lua|appid> [--all|--depots 1,2,3] [--out DIR] [-v]")
+	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  lua-dl <parse|probe|download> <file.lua|appid> [--all|--depots 1,2,3] [--out DIR] [-v]")
+	fmt.Fprintln(os.Stderr, "  lua-dl of <articleId|online-fix-url> [--out DIR] [-v]")
 }

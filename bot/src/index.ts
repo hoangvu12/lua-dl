@@ -106,8 +106,19 @@ async function handleDl(i: ChatInputCommandInteraction) {
   const query = i.options.getString("query");
 
   if (appid) {
-    const det = await fetchAppDetails(appid);
-    await sendBat(i, [{ appid, name: det?.name ?? `App ${appid}` }], lang);
+    // Defer FIRST. Resolving the name + install size hits appdetails and
+    // api.steamcmd.net (up to a 6s timeout) — well past Discord's 3s ack
+    // window. Without an early defer the interaction token expires and the
+    // reply (with the .bat) is rejected as "Unknown interaction" (10062),
+    // which looked like "the attachment failed to send".
+    await i.deferReply();
+    try {
+      const det = await fetchAppDetails(appid);
+      await sendBat(i, [{ appid, name: det?.name ?? `App ${appid}` }], lang);
+    } catch (err) {
+      console.error("[dl-appid]", err);
+      await failBat(i, lang);
+    }
     return;
   }
   if (query) {
@@ -118,6 +129,23 @@ async function handleDl(i: ChatInputCommandInteraction) {
     content: missingInputError(lang),
     flags: MessageFlags.Ephemeral,
   });
+}
+
+// Surfaces a build/send failure to the user on an already-deferred interaction,
+// swallowing any secondary error if the interaction is already gone.
+async function failBat(
+  i: ChatInputCommandInteraction | StringSelectMenuInteraction,
+  lang: Lang
+) {
+  const content =
+    lang === "vi"
+      ? "Có lỗi khi tạo file .bat, thử lại nhé."
+      : "Something went wrong building the .bat — try again.";
+  try {
+    await i.editReply({ content, embeds: [], components: [] });
+  } catch {
+    /* interaction expired or already resolved */
+  }
 }
 
 // --- Online-Fix full-game flow (/of) ---------------------------------------
@@ -304,7 +332,9 @@ async function sendBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  await i.reply({
+  // The caller defers before this runs, so edit the deferred reply. editReply
+  // is the webhook-edit path that attaches files reliably.
+  await i.editReply({
     content: reply(lang, apps, size),
     files: [new AttachmentBuilder(Buffer.from(bat, "utf8"), { name })],
   });
@@ -447,9 +477,31 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
   const appid = Number(i.values[0]);
   if (!Number.isFinite(appid) || appid <= 0) return;
 
-  // Re-resolve the picked app to decide if we need the child selector.
+  // Ack within Discord's 3s window before any network. Re-resolving the app
+  // and its size can hit appdetails + api.steamcmd.net (6s timeout); on a cold
+  // cache that overruns the component-interaction deadline and the follow-up
+  // .bat is rejected as "Unknown interaction".
+  try {
+    await i.deferUpdate();
+  } catch {
+    return; // token already gone; nothing we can do
+  }
+
+  try {
+    await sendRootPick(i, appid, lang);
+  } catch (err) {
+    console.error("[dl-pick]", err);
+    await failBat(i, lang);
+  }
+}
+
+async function sendRootPick(
+  i: StringSelectMenuInteraction,
+  appid: number,
+  lang: Lang
+) {
   // Details are cached from the initial search so this is almost always a
-  // cache hit; we still defer the update in case we need the network.
+  // cache hit; the early deferUpdate covers the cold-cache network case.
   const [det, rootSizes] = await Promise.all([
     fetchAppDetails(appid),
     fetchAppSizes(appid),
@@ -513,7 +565,7 @@ async function handleRootPick(i: StringSelectMenuInteraction) {
     .setMaxValues(options.length)
     .addOptions(options);
 
-  await i.update({
+  await i.editReply({
     content: childHeader(lang, rootName),
     embeds: [],
     components: [
@@ -531,14 +583,24 @@ async function handleChildPick(i: StringSelectMenuInteraction) {
     .filter((n) => Number.isFinite(n) && n > 0);
   if (appids.length === 0) return;
 
-  const apps = await Promise.all(
-    appids.map(async (appid): Promise<BatApp> => {
-      const det = await fetchAppDetails(appid);
-      return { appid, name: det?.name ?? `App ${appid}` };
-    })
-  );
+  try {
+    await i.deferUpdate();
+  } catch {
+    return;
+  }
 
-  await updateWithBat(i, apps, lang);
+  try {
+    const apps = await Promise.all(
+      appids.map(async (appid): Promise<BatApp> => {
+        const det = await fetchAppDetails(appid);
+        return { appid, name: det?.name ?? `App ${appid}` };
+      })
+    );
+    await updateWithBat(i, apps, lang);
+  } catch (err) {
+    console.error("[dl-child]", err);
+    await failBat(i, lang);
+  }
 }
 
 async function updateWithBat(
@@ -549,7 +611,8 @@ async function updateWithBat(
   const bat = renderBat({ apps, version: CLI_VERSION!, repo: CLI_REPO! });
   const name = batFilename(apps);
   const size = await totalSizeLabel(apps);
-  await i.update({
+  // Caller defers first, so edit the deferred reply (reliable file attach path).
+  await i.editReply({
     content: reply(lang, apps, size),
     embeds: [],
     components: [],

@@ -18,8 +18,10 @@ Two commands:
 3. `cp .env.example .env`, fill in `DISCORD_TOKEN` and `DISCORD_APP_ID`
 4. Install: `bun install`
 5. Register the `/dl` and `/of` slash commands: `bun run register`
-6. Invite the bot to a server:
-   `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=applications.commands%20bot&permissions=2048`
+6. Invite the bot to a server (permissions=34816 = Send Messages + Attach
+   Files — the bot must be able to attach the generated `.bat`, or Discord
+   silently drops it and only the message text shows):
+   `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=applications.commands%20bot&permissions=34816`
 
 ## Running
 
